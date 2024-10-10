@@ -17,6 +17,9 @@ use chrono::{NaiveDateTime, TimeZone, Utc};
 
 //use chrono::{NaiveDateTime, TimeZone, Utc};
 //use ring::signature::{self, UnparsedPublicKey};
+const ECDSA_OID_BYTES: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
+const RSA_OID_BYTES: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01];
+
 
 pub struct Pkcs7 {
     pub content_type: Oid,
@@ -112,7 +115,7 @@ pub struct TbsCertificate {
 
 pub struct AlgorithmIdentifier {
     pub algorithm: Oid,
-    pub parameters: Option<Vec<u8>>, // Optional parameters
+    pub parameters: Vec<u8>, // Optional parameters
 }
 
 pub struct Validity {
@@ -127,9 +130,14 @@ pub struct SubjectPublicKeyInfo {
 }
 #[derive(Debug)]
 
-pub struct PublicKey {
-    pub modulus: Vec<u8>,
-    pub exp: Vec<u8>,
+pub enum PublicKey {
+    Rsa {
+        modulus: Vec<u8>,
+        exponent: Vec<u8>,
+    },
+    Ecdsa {
+        point: Vec<u8>,
+    },
 }
 
 
@@ -237,7 +245,7 @@ impl SignerInfo {
             
             let auth_captured = cons.capture_one()?;
             let mut auth_bytes = auth_captured.as_slice().to_vec();
-            auth_bytes.drain(0..2); //remove implicit tag and lenght (A0,len,len)
+            auth_bytes.drain(0..3); //remove implicit tag and lenght (A0,len,len)
             let auth_source = auth_captured.into_source();
 
             let auth_attributes = Constructed::decode(auth_source, Mode::Ber, |cons|{
@@ -698,9 +706,13 @@ impl AlgorithmIdentifier {
         cons.take_sequence(|cons| {
 
             let algorithm = Oid::take_from(cons)?;
-            let parameters = None; //not needed
-            _= cons.skip_all();
-
+            /*let parameters = cons.take_opt_primitive(|_,content|{
+                let p = content.slice_all()?.to_vec();
+                println!("p {:?}\n",p);
+                Ok(p)
+            })?;*/
+            let parameters = cons.capture_all()?.to_vec();
+            _=cons.skip_all();
             Ok(AlgorithmIdentifier {
                 algorithm,
                 parameters,
@@ -709,7 +721,7 @@ impl AlgorithmIdentifier {
     }
     pub fn to_string(&self) -> String {
         format!(
-            "AlgorithmIdentifier {{\n    algorithm: {},\n    parameters: {:?}\n  }}",
+            "AlgorithmIdentifier {{    algorithm: {},\n    parameters: {:?}\n  }}",
             self.algorithm.to_string(),
             self.parameters
         )
@@ -768,7 +780,8 @@ impl Validity {
     }
 }
 
-impl SubjectPublicKeyInfo {
+
+/*impl SubjectPublicKeyInfo {
     pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
         cons.take_sequence(|cons| {
             let algorithm = AlgorithmIdentifier::take_from(cons)?;
@@ -819,34 +832,79 @@ impl SubjectPublicKeyInfo {
             Ok(SubjectPublicKeyInfo {
                 algorithm,
                 subject_public_key, // Modifica qui se vuoi salvare direttamente PublicKey
-            })
-            /*let subject_public_key = cons.take_primitive(|_, content| {
-                let mut key_bytes = content.slice_all()?.to_vec();
-                _= content.skip_all();
+            })*/
+        
+        
 
-                //remove first 9 -> Tag, sequence, ecc; last 5 -> exp
-                if key_bytes.len() > 14 {
-                    key_bytes.drain(0..9);
-                    let exp = key_bytes.truncate(key_bytes.len()-5); //exp
+
+
+impl SubjectPublicKeyInfo {
+    pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
+        cons.take_sequence(|cons| {
+            let algorithm = AlgorithmIdentifier::take_from(cons)?;
+
+            let subject_public_key = cons.take_primitive(|_, content| {
+                
+                let key_bytes = content.slice_all()?;
+
+                let pk = if algorithm.algorithm.as_ref() == RSA_OID_BYTES{
+                    let key_source = key_bytes[1..].into_source();
+                    //let  = key_bytes_trimmed.into_source();
+                    let public_key = Constructed::decode(key_source, Mode::Der, |cons| {
+                        cons.take_sequence(|cons| {
+
+                            let modulus = cons.take_value(|_,content| {
+                                let mod_bytes = content.as_primitive()?;
+                                let mut modu = mod_bytes.slice_all()?.to_vec();
+                                //remove initial 0 (positive/negative number in complement2 )
+                                modu.drain(0..1);
+                                _=mod_bytes.skip_all();
+                                Ok(modu)
+                            })?;
+                            
+                            let exponent = cons.take_value(|_,content|{
+                                let exp_bytes = content.as_primitive()?;
+                                let expp = exp_bytes.slice_all()?.to_vec();
+                                _=exp_bytes.skip_all();
+                                Ok(expp)
+                            })?;
+                            
+                            _=cons.skip_all();
+                            //println!("\n[*] parsed RSA key: mod: {:?}\nexp:{:?}",modulus,exponent);
+                            Ok(PublicKey::Rsa {
+                                modulus,
+                                exponent,
+                            })
+                        })
+                    }).expect("failed to parse public key modulus and exponent");
+                    
+                    _=content.skip_all();
+                    public_key //return to pk
+                } 
+                else if algorithm.algorithm.as_ref() == ECDSA_OID_BYTES {
+                    // TODO: invece che [1..] si dovrebbe creare una source e fare take_value(..){}
+                    let point_bytes = &key_bytes[1..];
+                    //println!("\n[*] parsed ECDSA key. point: {:?}",point_bytes);
+
+                    PublicKey::Ecdsa { point: point_bytes.to_vec() } //return to pk
                 }
                 else {
-                    println!("Failed to load pub Key");
-                    }
-                
-                Ok(key_bytes)
-                //let hex_bytes = hex::encode(&key_bytes);
-                //Ok(hex_bytes)
+                    return Err(DecodeError::content("Unsupported algorithm", decode::Pos::default()));
+                };
+
+                _=content.skip_all();
+                Ok(pk)
             })?;
-            _ = cons.skip_all();
-            
-            //println!("subpubkey {:?}", subject_public_key);
+
+            _ = cons.capture_all();
 
             Ok(SubjectPublicKeyInfo {
                 algorithm,
-                subject_public_key,
-            })*/
+                subject_public_key, 
+            })
         })
     }  
+    
     pub fn to_string(&self) -> String {
         format!(
             "SubjectPublicKeyInfo {{\n    algorithm: {},\n    subject_public_key: {:?}\n  }}",
@@ -855,6 +913,7 @@ impl SubjectPublicKeyInfo {
         )
     }     
 }
+
 
 /* load single x509 file
 
@@ -890,6 +949,15 @@ pub fn load_pkcs7(path: &str) -> Result<Pkcs7, Box<dyn std::error::Error>> {
 
     let pem = pem::parse(buffer)?;
     let bytes = pem.contents();
+    /*let bytes: Vec<u8>;
+
+    // if the file is PEM, parse 
+    let bytes_slice: &[u8] = if let Ok(pem) = pem::parse(&buffer) {
+        bytes = pem.contents().to_vec(); // Store the contents in a new Vec
+        &bytes // Reference the new Vec, which has the correct lifetime
+    } else {
+        &buffer // Use the entire buffer as a slice if it's DER
+    };*/
 
     let pkcs7 = Constructed::decode(bytes, Mode::Der, |constructed| {
         Pkcs7::take_from(constructed)

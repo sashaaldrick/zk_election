@@ -21,41 +21,35 @@ fn verify_rsa_signature(
     let modulus = rsa::BigUint::from_bytes_be(modulus_bytes);
     let exponent = rsa::BigUint::from_bytes_be(exp_bytes);
 
-    // Crea la chiave pubblica
     let pub_key = match RsaPublicKey::new(modulus, exponent) {
         Ok(key) => key,
         Err(_) => return false, // Gestisci parametri chiave non validi
     };
 
-    // Crea una chiave di verifica utilizzando PKCS#1 v1.5 e SHA-256
+    // PKCS#1 v1.5 e SHA-256
     let verifying_key = VerifyingKey::<Sha256>::new(pub_key);
 
-    // Crea un oggetto di firma dai byte della firma
     let signature = match RsaSignature::try_from(signature_bytes) {
         Ok(sig) => sig,
         Err(e) => {
-            println!("Errore durante il parsing della firma: {:?}", e);
+            println!("failed to create RsaSignature: {:?}", e);
             return false;
         }
     };
 
-    // Decodifica la firma per ottenere il valore di hash incorporato
-    if let Ok(decrypted_hash) = verifying_key.decrypt(&signature) {
+    /*if let Ok(decrypted_hash) = verifying_key.decrypt(&signature) {
         println!("Hash estratto dalla firma: {:?}", decrypted_hash);
     } else {
-        println!("Errore nella decodifica della firma");
+        println!("failed to decode signature");
         return false;
-    }
+    }*/
 
-    // Calcola l'hash del messaggio usando SHA-256
     let mut hasher = Sha256::new();
     hasher.update(msg);
     let digest = hasher.finalize();
 
-    // Stampa il digest calcolato
     println!("Digest calcolato: {:?}", digest);
 
-    // Verifica la firma usando il digest
     let res = verifying_key.verify_digest(Sha256::new_with_prefix(digest), &signature).is_ok();
     println!("Risultato della verifica: {}", res);
     res
@@ -176,7 +170,6 @@ fn main() {
     //println!("msg {:?}\n\n",msg);
 
 
-    // Seleziona l'algoritmo di digest basato sull'OID
     /*let digest = match algo_oid.as_slice() {
         // OID for SHA-1
         /*[0x2B, 0x0E, 0x03, 0x02, 0x1A] => {

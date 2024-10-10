@@ -9,7 +9,7 @@ use risc0_ethereum_contracts::groth16;
 use risc0_ethereum_contracts::encode_seal;
 use risc0_zkvm::{default_prover, ExecutorEnv, ProverOpts, VerifierContext, Receipt};
 use std::time::{SystemTime, UNIX_EPOCH};
-use apps::parser::load_pkcs7;
+use apps::parser::{load_pkcs7, PublicKey};
 //use crate::IRiscZeroElection::verifyAndCommitVoteCall;
 use hex;
 
@@ -139,7 +139,7 @@ fn select_digest_algorithm(algo_oid: &[u8]) -> &'static str {
     };*/
 
 
-fn prove_signature_verification(
+fn prove_rsa_verification(
     msg: &[u8],
     algo_oid: &[u8], 
     signature: &[u8], 
@@ -148,10 +148,8 @@ fn prove_signature_verification(
     prec_receipt: &Receipt,
 ) -> Receipt {
 
-//(msg: Vec<u8>, algo_oid: Vec<u8>, signature: Vec<u8>, pub_key: Vec<u8>, prec_receipt: Receipt) -> Receipt {
-    
+    //sending lenghts to create fixed size arrays in guest 
     let lenghts = (msg.len(), algo_oid.len(), signature.len(), pub_key_mod.len(), pub_key_exp.len());
-    //let algorithm = select_digest_algorithm(algo_oid);
 
     let env = ExecutorEnv::builder()
         //.add_assumption(prec_receipt)
@@ -162,13 +160,6 @@ fn prove_signature_verification(
         .write_slice(&pub_key_mod)
         .write_slice(&pub_key_exp)
         .build().unwrap();
-        
-
-        /*.write_slice(&msg)
-        .write_slice(&algo_oid)
-        .write_slice(&signature)
-        .write_slice(&pub_key)
-        .unwrap().build().unwrap(); */
 
     let prover = default_prover();
     prover.prove_with_ctx(
@@ -179,6 +170,48 @@ fn prove_signature_verification(
     ).unwrap().receipt
 
 }
+
+
+fn prove_signature_verification(
+    msg: &[u8],
+    algo_oid: &[u8], 
+    signature: &[u8], 
+    pub_key: &[u8], 
+    pub_key_exp: Option<&[u8]>, // only for RSA
+    prec_receipt: &Receipt,
+) -> Receipt {
+
+    // if RSA, send exp lenght, if ECDSA exp.len = 0
+    let lengths = if let Some(exp) = pub_key_exp {
+        (msg.len(), algo_oid.len(), signature.len(), pub_key.len(), exp.len())
+    } else {
+        (msg.len(), algo_oid.len(), signature.len(), pub_key.len(), 0)
+    };
+
+    let mut env_builder = ExecutorEnv::builder();
+
+    env_builder.write(&lengths).unwrap();
+    env_builder.write_slice(&msg);
+    env_builder.write_slice(&algo_oid);
+    env_builder.write_slice(&signature);
+    env_builder.write_slice(&pub_key);
+
+    if let Some(exp) = pub_key_exp {
+        env_builder.write_slice(&exp);
+    }
+
+    let env = env_builder.build().unwrap();
+
+    let prover = default_prover();
+    prover.prove_with_ctx(
+        env,
+        &VerifierContext::default(),
+        SIGNATURE_VERIFIER_ELF,
+        &ProverOpts::groth16(),
+    ).unwrap().receipt
+
+}
+
 
 
 fn main() -> Result<()> {
@@ -193,17 +226,16 @@ fn main() -> Result<()> {
         &args.eth_wallet_private_key,
         &args.contract,
     )?;*/
-
-    match load_pkcs7("/home/moz/tesi/cert/signed_doc.p7m") {
+    match load_pkcs7("/home/moz/tesi/sdoc.p7b") {
+    //match load_pkcs7("/home/moz/tesi/cert/ecdsa/signed_doc_pem.p7m") {
         Ok(pkcs7) => {
             println!("PKCS7 file loaded successfully!");
 
             let signer_infos = &pkcs7.content.signer_infos;
-            //let certificate = &pkcs7.content.certs[0];
 
             let signer_serial_number = &pkcs7.content.signer_infos[0].signer_identifier.serial_number;
 
-            // Trova il certificato corrispondente.
+            // use serial number to find user certificate
             let subject_cert = pkcs7.content.certs.iter()
                 .find(|cert| &cert.tbs_certificate.serial_number == signer_serial_number)
                 .expect("Subject certificate not found in certificate list");
@@ -223,7 +255,6 @@ fn main() -> Result<()> {
             let validity = &subject_cert.tbs_certificate.validity;
             let period_receipt = prove_validity_period(validity.not_before, validity.not_after, now);
             
-            //let seal = groth16::encode(receipt.inner.groth16()?.seal.clone())?;
             let seal = encode_seal(&period_receipt)?;
             let journal = period_receipt.journal.bytes.clone();
 
@@ -235,26 +266,49 @@ fn main() -> Result<()> {
             let signature = &signer_info.signature; 
             let digest_algorithm_oid = &signer_info.digest_algorithm.algorithm;
             let signature_algorithm_oid = &signer_info.signature_algorithm.algorithm;
+            println!("signature oid: {:?}\n",signature_algorithm_oid);
             let public_key = &subject_cert.tbs_certificate.subject_public_key_info.subject_public_key;
+            println!("\npublickey: {:?}",public_key);
             let msg = if signer_info.auth_attributes.is_some() { 
-                &signer_info.auth_bytes
+                &signer_info.auth_bytes 
             } else {
-                &pkcs7.content_bytes
+                &pkcs7.content_bytes //this is the data of the signed document
             };
             
             println!("-------------------------------------------\n\n");
             println!("msg {:?}\n",hex::encode(&msg));
 
-            //println!("signature: {:?}\ndig_algo_oid {:?}\n dig_encryption_algOid {:?}\n public key: {:?}",signature, digest_algorithm_oid.as_ref(), signature_algorithm_oid.as_ref(), public_key_bytes.to_vec());
-
-            let signature_receipt = prove_signature_verification(
+            let signature_receipt = match &public_key {
+                PublicKey::Rsa { modulus, exponent } => {
+                    prove_signature_verification(
+                        msg.as_ref(),
+                        digest_algorithm_oid.as_ref(), 
+                        signature.as_ref(), 
+                        modulus.as_ref(), 
+                        Some(exponent.as_ref()),
+                        &period_receipt,
+                    )
+                }
+                PublicKey::Ecdsa { point } => {
+                    prove_signature_verification(
+                        msg.as_ref(),
+                        digest_algorithm_oid.as_ref(),
+                        signature.as_ref(),
+                        point.as_ref(),
+                        None,
+                        &period_receipt,
+                    )
+                }
+            };
+            
+            /*let signature_receipt = prove_signature_verification(
                 msg.as_ref(),
                 digest_algorithm_oid.as_ref(), 
                 signature.as_ref(), 
                 public_key.modulus.as_ref(), 
                 public_key.exp.as_ref(),
                 &period_receipt,
-            );
+            );*/
 
             //let seal_sig = encode_seal(&signature_receipt)?;
             //let journal_sig = signature_receipt.journal.bytes.clone();
