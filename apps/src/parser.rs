@@ -18,6 +18,8 @@ use chrono::{NaiveDateTime, TimeZone, Utc};
 //use chrono::{NaiveDateTime, TimeZone, Utc};
 //use ring::signature::{self, UnparsedPublicKey};
 const ECDSA_OID_BYTES: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
+const ECDSA_SIGN_OID_BYTES: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04,0x03, 0x02];
+
 const RSA_OID_BYTES: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01];
 
 
@@ -55,7 +57,7 @@ pub struct SignerInfo {
 #[derive(Debug)]
 
 pub struct SignerIdentifier {
-    pub issuer: Vec<u8>,
+    pub issuer: Name,
     pub serial_number: String, //hex
 }
 /*
@@ -64,34 +66,26 @@ pub struct IssuerAndSerialNumber {
     pub issuer: Vec<RelativeDistinguishedName>,  
     pub serial_number: Vec<u8>,
 }*/
-/*
+
 #[derive(Debug)]
 pub struct Name {
     pub rdn_sequence: Vec<RelativeDistinguishedName>,
-}*/
+}
 
 #[derive(Debug)]
 pub struct RelativeDistinguishedName {
-    pub attributes: Vec<AttributeTypeAndValue>,
+    pub attribute: Attribute,
 }
-#[derive(Debug)]
-pub struct AttributeTypeAndValue {
-    pub attribute_type: Oid,
-    pub attribute_value: String,
-}
+/*
 #[derive(Debug)]
 pub struct AuthenticatedAttributes {
     //pub auth_attr_bytes: Vec<u8>, 
     pub attributes: Vec<Attribute>,
-}
+}*/
 #[derive(Debug)]
 pub struct Attribute {
     pub oid: Oid,           
     pub value: Vec<u8>, 
-}
-
-pub struct AttributeValue{
-    pub bytes_value: Vec<u8>,
 }
 
 
@@ -105,9 +99,9 @@ pub struct TbsCertificate {
     pub version: Option<u8>,
     pub serial_number: String,
     pub signature_algorithm: AlgorithmIdentifier,
-    pub issuer: Vec<u8>,
+    pub issuer: Name,
     pub validity: Validity,
-    pub subject: Vec<u8>,
+    pub subject: Name,
     pub subject_public_key_info: SubjectPublicKeyInfo,
     //pub tbs_bytes: Vec<u8>,
 }
@@ -243,9 +237,19 @@ impl SignerInfo {
             
             let digest_algorithm = AlgorithmIdentifier::take_from(cons)?;
             
+            /*let auth_captured = cons.capture_one()?;
+            let mut auth_bytes = auth_captured.as_slice().to_vec();
+            auth_bytes.drain(0..3); //remove implicit tag and lenght (A0,len,len)*/
+
             let auth_captured = cons.capture_one()?;
             let mut auth_bytes = auth_captured.as_slice().to_vec();
-            auth_bytes.drain(0..3); //remove implicit tag and lenght (A0,len,len)
+            
+            //remove IMPLICIT TAG (A0), insert SET OF TAG (0x31)
+            auth_bytes[0] = 0x31;
+            
+            println!("\nauth_bytes {:?}\n",auth_bytes);
+
+
             let auth_source = auth_captured.into_source();
 
             let auth_attributes = Constructed::decode(auth_source, Mode::Ber, |cons|{
@@ -263,20 +267,85 @@ impl SignerInfo {
 
             let signature_algorithm = AlgorithmIdentifier::take_from(cons)?;
 
-            let signature = cons.take_value(|_,content| {
-                let sign = content.as_primitive().map_err(|e|{
-                    DecodeError::content(format!("Expected constructed content: {}", e), decode::Pos::default())
+            let signature_captured = cons.capture_all()?;
+            //let b = signature_captured.as_slice().to_vec();
+            //println!("\nb {:?}\n sign algo: {:?}",b,signature_algorithm.algorithm.as_ref().bytes());
+            let signature = if signature_algorithm.algorithm.as_ref() == RSA_OID_BYTES{
+                let rsa_signature = cons.take_value(|_,content| {
+                    let sign = content.as_primitive().map_err(|e|{
+                        DecodeError::content(format!("Expected constructed content: {}", e), decode::Pos::default())
+                    })?;
+                    let sign_bytes = sign.slice_all()?.to_vec();
+                    _=sign.skip_all();
+                    Ok(sign_bytes)
                 })?;
-                let sign_bytes = sign.slice_all()?.to_vec();
-                _=sign.skip_all();
-                Ok(sign_bytes)
-            })?;
+                _=cons.skip_all();
+                rsa_signature
+    
+            } else if signature_algorithm.algorithm.as_ref() == ECDSA_SIGN_OID_BYTES {
+                let sign_source = signature_captured.as_slice().into_source();
+                println!("\nsign_source: {:?}", sign_source);
+            
+                let signature = Constructed::decode(sign_source, Mode::Ber, |cons| {
+                    cons.take_value(|_, content| {
+                       
+                       let signature_bytes = {
+                        let primitive_content = content.as_primitive()?;
+                        primitive_content.slice_all()?.to_vec()
+                       };
 
+                       _ = content.as_primitive()?.skip_all();
+
+                        if signature_bytes.len() < 72 {
+                            return Err(DecodeError::content("ECDSA signature too short!", decode::Pos::default()));
+                        }
+                        let mut r = signature_bytes[5..37].to_vec();
+
+                        let mut s = signature_bytes[40..72].to_vec();
+
+                        if r.len() < 32 {
+                            let mut padded_r = vec![0u8; 32 - r.len()];
+                            padded_r.extend_from_slice(&r);
+                            r = padded_r;
+                        } else if r.len() > 32 {
+                            return Err(DecodeError::content("Key(r) too long", decode::Pos::default()));
+                        }
+                    
+                        if s.len() < 32 {
+                            let mut padded_s = vec![0u8; 32 - s.len()];
+                            padded_s.extend_from_slice(&s);
+                            s = padded_s;
+                        } else if s.len() > 32 {
+                            return Err(DecodeError::content("Key(s) too long", decode::Pos::default()));
+                        }
+
+
+                        println!("\n\n-------------------------\nr {:?}\ns {:?} \n",r,s);
+                        
+                        //sec1 encoding
+                        //let mut signature = vec![0x4];
+                        //signature.extend(r);
+                        let mut signature = r;
+                        signature.extend(s);
+
+                        println!("\nsource: {:?}\n\nextracted ECDSA signature: [{:?},   len: {:?}\n",sign_source, signature, signature.len());
+
+                        Ok(signature)
+                    })
+                }).expect("failed to parse ecdsa signature");
+                
+                _=cons.skip_all();
+                signature
+            }
+            else {
+                return Err(DecodeError::content("Unsupported signature algorithm", decode::Pos::default()));
+            };
+            
             /*let unauthenticated_attributes = cons.take_opt_constructed_if(Tag::CTX_1, |cons| {
                 AuthenticatedAttributes::take_from(cons)
             })?;*/
 
-            cons.skip_all().unwrap_or(());
+            _=cons.skip_all();
             //let unauthenticated_attributes = None;
             Ok(SignerInfo {
                 version,
@@ -306,12 +375,13 @@ impl SignerIdentifier {
 
         let signer_identifier = cons.take_sequence(|cons| {
             // Capture the issuer bytes as needed
-            let issuer = cons.take_sequence(|cons|{
+            /*let issuer = cons.take_sequence(|cons|{
                 let issuer_bytes = cons.capture_all()?.as_slice().to_vec();
                 Ok(issuer_bytes)
-            })?;
+            })?;*/
 
-            // Capture the serial number
+            let issuer = Name::take_from(cons)?;
+
             let serial_number = cons.take_primitive(|_, content| {
                 let sn = content.slice_all()?.to_vec();
                 _=content.skip_all();
@@ -330,6 +400,44 @@ impl SignerIdentifier {
 }
 
 
+impl Name {
+    pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
+    
+        //println!("name cons: {:?}\n",cons);
+        let mut rdn_sequence = Vec::new();
+
+        let name = cons.take_sequence(|cons|{
+            while let Ok(rdn) = RelativeDistinguishedName::take_from(cons) {
+                rdn_sequence.push(rdn);
+            }
+            
+            Ok( Name { rdn_sequence })
+        }).expect("failed to parse name");
+        Ok(name)
+    }
+}
+
+impl RelativeDistinguishedName {
+    pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
+        
+        let attribute = cons.take_set(|cons|{
+            let attr = cons.take_sequence(|cons|{
+                let oid = Oid::take_from(cons)?;
+                let value = cons.take_value(|_,content|{
+                    let val = content.as_primitive()?.slice_all()?.to_vec();
+                    _=content.as_primitive()?.skip_all();
+                    Ok(val)
+                })?;
+                Ok( Attribute{ oid, value })
+            })?;
+            _=cons.skip_all();
+            Ok(attr)
+            
+        })?;
+        Ok( RelativeDistinguishedName{ attribute })
+
+    }
+}
 /*
 impl IssuerAndSerialNumber {
     pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
@@ -643,7 +751,7 @@ impl TbsCertificate {
             let signature_algorithm = AlgorithmIdentifier::take_from(cons)?;
 
             // only byte vec, for more detailed issuer, take it as a SEQUENCE and parse...
-            let issuer = cons.take_value_if(Tag::SEQUENCE, |content| {
+            /*let issuer = cons.take_value_if(Tag::SEQUENCE, |content| {
                 let constructed_content = content.as_constructed().map_err(|e|{
                     DecodeError::content(format!("Expected constructed content: {}", e), decode::Pos::default())
                 })?;
@@ -652,13 +760,14 @@ impl TbsCertificate {
                 let issuer_vec = issuer_bytes.to_vec();
 
                 Ok(issuer_vec)
-            })?;
+            })?;*/
+            let issuer = Name::take_from(cons)?;
 
             //asn1 format YYMMDDHHMMSSZ
             let validity = Validity::take_from(cons)?;
 
             //same as issuer
-            let subject = cons.take_value_if(Tag::SEQUENCE, |content| {
+            /*let subject = cons.take_value_if(Tag::SEQUENCE, |content| {
                 let constructed_content = content.as_constructed().map_err(|e|{
                     DecodeError::content(format!("Expected constructed content: {}", e), decode::Pos::default())
                 })?;
@@ -667,7 +776,8 @@ impl TbsCertificate {
                 let subject_vec = issuer_bytes.to_vec();
                 //println!("sub {:?}",subject_vec);
                 Ok(subject_vec)
-            })?;
+            })?;*/
+            let subject = Name::take_from(cons)?;
 
             let subject_public_key_info = SubjectPublicKeyInfo::take_from(cons)?;
 
@@ -781,63 +891,7 @@ impl Validity {
 }
 
 
-/*impl SubjectPublicKeyInfo {
-    pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
-        cons.take_sequence(|cons| {
-            let algorithm = AlgorithmIdentifier::take_from(cons)?;
-
-            
-            let subject_public_key = cons.take_primitive(|_, content| {
-                
-                let key_bytes = content.slice_all()?;
-
-                let key_bytes_trimmed = &key_bytes[1..];
-                let key_source = key_bytes_trimmed.into_source();
-
-                let public_key = Constructed::decode(key_source, Mode::Der, |cons| {
-
-                    cons.take_sequence(|cons| {
-
-                        let modulus = cons.take_value(|_,content| {
-                            let mod_bytes = content.as_primitive()?;
-                            let mut modu = mod_bytes.slice_all()?.to_vec();
-                            //remove initial 0 (positive/negative number in complement2 )
-                            modu.drain(0..1);
-                            _=mod_bytes.skip_all();
-                            Ok(modu)
-                        })?;
-                        
-                        let exp = cons.take_value(|_,content|{
-                            let exp_bytes = content.as_primitive()?;
-                            let expp = exp_bytes.slice_all()?.to_vec();
-                            _=exp_bytes.skip_all();
-                            Ok(expp)
-                        })?;
-
-
-                        Ok(PublicKey {
-                            modulus,
-                            exp,
-                        })
-                    })
-                }).expect("failed to parse public key modulus and exponent");
-
-                _=content.skip_all();
-
-                Ok(public_key)
-            })?;
-
-            _ = cons.capture_all();
-
-            Ok(SubjectPublicKeyInfo {
-                algorithm,
-                subject_public_key, // Modifica qui se vuoi salvare direttamente PublicKey
-            })*/
-        
-        
-
-
-
+    
 impl SubjectPublicKeyInfo {
     pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
         cons.take_sequence(|cons| {
