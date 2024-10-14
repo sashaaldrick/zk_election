@@ -22,13 +22,13 @@ const ECDSA_SIGN_OID_BYTES: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04,0x03, 0
 
 const RSA_OID_BYTES: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01];
 
-
+#[derive(Debug)]
 pub struct Pkcs7 {
     pub content_type: Oid,
     pub content: SignedData,
     pub content_bytes: Vec<u8>,
 }
-
+#[derive(Debug)]
 pub struct SignedData {
     pub version: u8,
     pub digest_algorithms: Vec<AlgorithmIdentifier>,
@@ -37,12 +37,12 @@ pub struct SignedData {
     pub crls: Vec<u8>,
     pub signer_infos: Vec<SignerInfo>, // Multiple SignerInfo structures
 }
-
+#[derive(Debug)]
 pub struct ContentInfo {
     pub content_type: Oid,
     pub e_content: Option<Vec<u8>>, // Encapsulated content, present if doc sigend with -nodetach option
 }
-
+#[derive(Debug)]
 pub struct SignerInfo {
     pub version: u8,
     pub signer_identifier: SignerIdentifier,
@@ -55,7 +55,6 @@ pub struct SignerInfo {
     //pub unauthenticated_attributes: Option<AuthenticatedAttributes>, // Optional field
 }
 #[derive(Debug)]
-
 pub struct SignerIdentifier {
     pub issuer: Name,
     pub serial_number: String, //hex
@@ -88,14 +87,17 @@ pub struct Attribute {
     pub value: Vec<u8>, 
 }
 
+#[derive(Debug)]
 
 pub struct Certificate {
     pub tbs_certificate: TbsCertificate,
     pub signature_algorithm: AlgorithmIdentifier,
     pub signature_value: Vec<u8>,
 }
+#[derive(Debug)]
 
 pub struct TbsCertificate {
+    pub tbs_bytes: Vec<u8>,
     pub version: Option<u8>,
     pub serial_number: String,
     pub signature_algorithm: AlgorithmIdentifier,
@@ -103,7 +105,6 @@ pub struct TbsCertificate {
     pub validity: Validity,
     pub subject: Name,
     pub subject_public_key_info: SubjectPublicKeyInfo,
-    //pub tbs_bytes: Vec<u8>,
 }
 #[derive(Debug)]
 
@@ -111,12 +112,14 @@ pub struct AlgorithmIdentifier {
     pub algorithm: Oid,
     pub parameters: Vec<u8>, // Optional parameters
 }
+#[derive(Debug)]
 
 pub struct Validity {
     pub not_before: u64,
     pub not_after: u64,
 }
 
+#[derive(Debug)]
 pub struct SubjectPublicKeyInfo {
     pub algorithm: AlgorithmIdentifier,
     pub subject_public_key: PublicKey,
@@ -246,9 +249,6 @@ impl SignerInfo {
             
             //remove IMPLICIT TAG (A0), insert SET OF TAG (0x31)
             auth_bytes[0] = 0x31;
-            
-            println!("\nauth_bytes {:?}\n",auth_bytes);
-
 
             let auth_source = auth_captured.into_source();
 
@@ -283,9 +283,7 @@ impl SignerInfo {
                 rsa_signature
     
             } else if signature_algorithm.algorithm.as_ref() == ECDSA_SIGN_OID_BYTES {
-                let sign_source = signature_captured.as_slice().into_source();
-                println!("\nsign_source: {:?}", sign_source);
-            
+                let sign_source = signature_captured.as_slice().into_source();            
                 let signature = Constructed::decode(sign_source, Mode::Ber, |cons| {
                     cons.take_value(|_, content| {
                        
@@ -320,7 +318,7 @@ impl SignerInfo {
                         }
 
 
-                        println!("\n\n-------------------------\nr {:?}\ns {:?} \n",r,s);
+                        //println!("\n\n-------------------------\nr {:?}\ns {:?} \n",r,s);
                         
                         //sec1 encoding
                         //let mut signature = vec![0x4];
@@ -328,7 +326,7 @@ impl SignerInfo {
                         let mut signature = r;
                         signature.extend(s);
 
-                        println!("\nsource: {:?}\n\nextracted ECDSA signature: [{:?},   len: {:?}\n",sign_source, signature, signature.len());
+                        //println!("\nsource: {:?}\n\nextracted ECDSA signature: [{:?},   len: {:?}\n",sign_source, signature, signature.len());
 
                         Ok(signature)
                     })
@@ -417,6 +415,12 @@ impl Name {
     }
 }
 
+impl PartialEq for Name {
+    fn eq(&self, other: &Self) -> bool {
+        self.rdn_sequence == other.rdn_sequence
+    }
+}
+
 impl RelativeDistinguishedName {
     pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
         
@@ -436,6 +440,13 @@ impl RelativeDistinguishedName {
         })?;
         Ok( RelativeDistinguishedName{ attribute })
 
+    }
+}
+
+impl PartialEq for RelativeDistinguishedName {
+    fn eq(&self, other: &Self) -> bool {
+        (self.attribute.oid == other.attribute.oid) &&
+        (self.attribute.value == other.attribute.value)
     }
 }
 /*
@@ -725,76 +736,56 @@ impl Certificate {
 impl TbsCertificate {
     pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
 
+        let tbs_captured = cons.capture_one()?;
+        let tbs_bytes = tbs_captured.as_slice().to_vec();
+        let tbs_source = tbs_captured.into_source();
+
         //let mut tbs_bytes: Vec<u8> = Vec::new();
-        cons.take_sequence(|cons| {
-            
-            //version = optional field
-            let version = cons.take_opt_constructed_if(Tag::CTX_0, |cons| {
+        //let tbs_certificate = cons.take_sequence(|cons| {
+        let tbs_certificate = Constructed::decode(tbs_source, Mode::Der, |cons|{  
+            cons.take_sequence(|cons|{
+                //version = optional field
+                let version = cons.take_opt_constructed_if(Tag::CTX_0, |cons| {
                 cons.take_primitive_if(Tag::INTEGER, |content| {
                     let v = content.to_u8()?;
                     //tbs_bytes.push(v);
                     Ok(v)                    
                 })
                 //println!("[tbs] version {:?}",version);
-            })?;
+                })?;
             
-            let serial_number = cons.take_primitive(|_,content| {
+                let serial_number = cons.take_primitive(|_,content| {
                 let bytes = content.slice_all()?.to_vec();     
-                //tbs_bytes.extend(bytes.clone());
                 let hex_bytes = hex::encode(&bytes); 
-                //println!("bytes {:?}",hex_bytes);
                 _ = content.skip_all();
-                //println!("[tbs] Serial Number Bytes: {:?}", serial_number);
                 Ok(hex_bytes)
-            })?;
-            
-            let signature_algorithm = AlgorithmIdentifier::take_from(cons)?;
-
-            // only byte vec, for more detailed issuer, take it as a SEQUENCE and parse...
-            /*let issuer = cons.take_value_if(Tag::SEQUENCE, |content| {
-                let constructed_content = content.as_constructed().map_err(|e|{
-                    DecodeError::content(format!("Expected constructed content: {}", e), decode::Pos::default())
                 })?;
-                
-                let issuer_bytes = constructed_content.capture_all()?;
-                let issuer_vec = issuer_bytes.to_vec();
-
-                Ok(issuer_vec)
-            })?;*/
-            let issuer = Name::take_from(cons)?;
-
-            //asn1 format YYMMDDHHMMSSZ
-            let validity = Validity::take_from(cons)?;
-
-            //same as issuer
-            /*let subject = cons.take_value_if(Tag::SEQUENCE, |content| {
-                let constructed_content = content.as_constructed().map_err(|e|{
-                    DecodeError::content(format!("Expected constructed content: {}", e), decode::Pos::default())
-                })?;
-                
-                let issuer_bytes = constructed_content.capture_all()?;
-                let subject_vec = issuer_bytes.to_vec();
-                //println!("sub {:?}",subject_vec);
-                Ok(subject_vec)
-            })?;*/
-            let subject = Name::take_from(cons)?;
-
-            let subject_public_key_info = SubjectPublicKeyInfo::take_from(cons)?;
-
-            _ = cons.skip_all();
             
-            Ok(TbsCertificate {
-                version,
-                serial_number,
-                signature_algorithm,
-                issuer,
-                validity,
-                subject,
-                subject_public_key_info,
-                //tbs_bytes,
+                let signature_algorithm = AlgorithmIdentifier::take_from(cons)?;
+                let issuer = Name::take_from(cons)?;
+                //asn1 format YYMMDDHHMMSSZ
+                let validity = Validity::take_from(cons)?;
+                let subject = Name::take_from(cons)?;
+                let subject_public_key_info = SubjectPublicKeyInfo::take_from(cons)?;
+                _ = cons.skip_all();
+                
+                Ok(TbsCertificate {
+                    tbs_bytes,
+                    version,
+                    serial_number,
+                    signature_algorithm,
+                    issuer,
+                    validity,
+                    subject,
+                    subject_public_key_info,
+                })
             })
-        })
+            
+        }).expect("failed to parse tbs certificate");
+
+        Ok(tbs_certificate)
     }
+
     pub fn to_string(&self) -> String {
         format!(
             "TbsCertificate {{\n    version: {:?},\n    serial_number: {:?},\n    signature_algorithm: {},\n    issuer: {:?},\n    validity: {},\n    subject: {:?},\n    subject_public_key_info: {}\n  }}",
