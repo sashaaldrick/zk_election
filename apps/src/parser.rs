@@ -12,6 +12,7 @@ use bcder::{Oid, Tag, Mode};
 use bcder::decode::{self, Constructed, DecodeError};
 use std::fs::File;
 use std::io::Read;
+use std::fmt;
 use hex;
 use chrono::{NaiveDateTime, TimeZone, Utc};
 
@@ -247,8 +248,8 @@ impl SignerInfo {
             let mut auth_bytes = auth_captured.as_slice().to_vec();
             
             //remove IMPLICIT TAG (A0), insert SET OF TAG (0x31)
-            //auth_bytes[0] = 0x31;
-            auth_bytes.drain(0..1);
+            auth_bytes[0] = 0x31;
+            //auth_bytes.drain(0..1);
             let auth_source = auth_captured.into_source();
 
             let auth_attributes = Constructed::decode(auth_source, Mode::Ber, |cons|{
@@ -386,7 +387,6 @@ impl SignerIdentifier {
                 Ok(sn_hex)
             })?;
 
-            println!("\n\n SIGNED IDENTIFIER: {:?}",issuer);
             Ok(SignerIdentifier {
                 issuer,
                 serial_number,
@@ -420,6 +420,36 @@ impl PartialEq for Name {
         self.rdn_sequence == other.rdn_sequence
     }
 }
+
+
+
+impl fmt::Display for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut parts = Vec::new();
+        
+        for rdn in &self.rdn_sequence {
+            let oid_str = match rdn.attribute.oid.to_string().as_str() {
+                "2.5.4.6" => "countryName",
+                "2.5.4.8" => "stateOrProvinceName",
+                "2.5.4.7" => "localityName",
+                "2.5.4.10" => "organizationName",
+                "2.5.4.11" => "organizationalUnitName",
+                "2.5.4.3" => "commonName",
+                _ => "unknown",
+            };
+
+            // Convert the value from Vec<u8> to a UTF-8 string
+            let value_str = String::from_utf8(rdn.attribute.value.clone())
+                .unwrap_or_else(|_| "invalid UTF-8".to_string());
+
+            parts.push(format!("{} = {}", oid_str, value_str));
+        }
+
+        write!(f, "{}", parts.join(", "))
+    }
+}
+
+
 
 impl RelativeDistinguishedName {
     pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {

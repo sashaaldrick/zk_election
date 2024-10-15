@@ -1,5 +1,11 @@
-use alloy_primitives::U256;
-use alloy_sol_types::{sol, /*SolInterface, SolValue,*/ SolCall};
+use alloy::{
+    network::{EthereumWallet, TransactionBuilder},
+    primitives::{Address, Bytes},
+    providers::{Provider, ProviderBuilder},
+    rpc::types::TransactionRequest,
+    signers::local::PrivateKeySigner,
+    sol,
+};
 use anyhow::{Context, Result};
 use apps::parser::Certificate;
 use clap::Parser;
@@ -11,18 +17,20 @@ use risc0_zkvm::{default_prover, ExecutorEnv, ProverOpts, VerifierContext, Recei
 use std::time::{SystemTime, UNIX_EPOCH};
 use apps::parser::{load_pkcs7, PublicKey};
 //use crate::IRiscZeroElection::verifyAndCommitVoteCall;
+use url::Url;
 use hex;
 
 // `IRiscZeroElection` interface automatically generated via the alloy `sol!` macro.
 sol! {
     interface IRiscZeroElection {
-        function verifyAndCommitVote(bytes calldata seal, bytes calldata journal);
+        function verifyAndCommitVote(bytes calldata seal, bytes calldata journal) public;
     }
 }
 
 /// Wrapper of a `SignerMiddleware` client to send transactions to the given
 /// contract's `Address`.
-pub struct TxSender {
+///
+/*pub struct TxSender {
     chain_id: u64,
     client: SignerMiddleware<Provider<Http>, Wallet<k256::ecdsa::SigningKey>>,
     contract: Address,
@@ -67,27 +75,27 @@ impl TxSender {
 
         Ok(tx)
     }
-}
+}*/
 
 /// Arguments of the publisher CLI.
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
     /// Ethereum chain ID
-    #[clap(long)]
-    chain_id: u64,
+    //#[clap(long)]
+    //chain_id: u64,
 
     /// Ethereum Node endpoint.
     #[clap(long, env)]
-    eth_wallet_private_key: String,
+    eth_wallet_private_key: PrivateKeySigner,
 
     /// Ethereum Node endpoint.
     #[clap(long)]
-    rpc_url: String,
+    rpc_url: Url,
 
     /// Application's contract address on Ethereum
     #[clap(long)]
-    contract: String,
+    contract: Address,
 
     /// The input to provide to the guest binary
     #[clap(long)]
@@ -138,7 +146,7 @@ fn select_digest_algorithm(algo_oid: &[u8]) -> &'static str {
         _ => unreachable!(), // Questo non dovrebbe mai accadere
     };*/
 
-
+/*
 fn prove_rsa_verification(
     msg: &[u8],
     algo_oid: &[u8], 
@@ -169,7 +177,7 @@ fn prove_rsa_verification(
         &ProverOpts::groth16(),
     ).unwrap().receipt
 
-}
+}*/
 
 
 fn prove_signature_verification(
@@ -213,26 +221,69 @@ fn prove_signature_verification(
 }
 
 
+fn build_certificate_chain<'a>(
+    certs: &'a [Certificate],
+    leaf_cert: &'a Certificate,
+) -> Result<Vec<&'a Certificate>, String> {
 
+    let mut chain = Vec::new();
+    let mut current_cert = leaf_cert;
+
+    //println!("\nstarting build chain. leaf: {:?}",current_cert);
+    loop {
+        chain.push(current_cert);
+        println!("\npushed to chain (subject): {:?}\n",current_cert.tbs_certificate.subject.to_string());
+
+        if current_cert.tbs_certificate.issuer == current_cert.tbs_certificate.subject {
+            // Reached self-signed certificate (root CA)
+            //maybe check here if it's present in LOTL
+            break;
+        }
+
+        let issuer_dn = &current_cert.tbs_certificate.issuer;
+        println!("issuer_dn: {:?}",issuer_dn.to_string());
+
+        let issuer_cert = certs.iter()
+            .find(|cert| &cert.tbs_certificate.subject == issuer_dn)
+            .ok_or("Issuer certificate not found")?;
+
+        current_cert = issuer_cert;
+    }
+
+    Ok(chain)
+}
+
+
+
+
+//#[tokio::main]
 fn main() -> Result<()> {
     env_logger::init();
     // Parse CLI Arguments: The application starts by parsing command-line arguments provided by the user.
-    /*let args = Args::parse();
+    //let args = Args::parse();
 
     // Create a new transaction sender using the parsed arguments.
-    let tx_sender = TxSender::new(
+    /*let tx_sender = TxSender::new(
         args.chain_id,
         &args.rpc_url,
         &args.eth_wallet_private_key,
         &args.contract,
     )?;*/
-    match load_pkcs7("/home/moz/tesi/sdoc.p7b") {
-    //match load_pkcs7("/home/moz/tesi/cert/ecdsa/signed_doc_pem.p7m") {
+
+    /*let wallet = EthereumWallet::from(args.eth_wallet_private_key);
+    let provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(wallet)
+        .on_http(args.rpc_url);*/
+
+
+    match load_pkcs7("/home/moz/tesi/cert/rsa/signed_doc.p7m") {
+    //match load_pkcs7("/home/moz/tesi/cert/ecdsa/buono/signed_doc.p7m") {
         Ok(pkcs7) => {
             println!("PKCS7 file loaded successfully!");
 
             let signer_infos = &pkcs7.content.signer_infos;
-
+            
             let signer_serial_number = &pkcs7.content.signer_infos[0].signer_identifier.serial_number;
 
             // use serial number to find user certificate
@@ -240,75 +291,69 @@ fn main() -> Result<()> {
                 .find(|cert| &cert.tbs_certificate.serial_number == signer_serial_number)
                 .expect("Subject certificate not found in certificate list");
 
-            println!("-----------------------------------\n");
-            println!("subject serial number: {:?}",subject_cert.tbs_certificate.serial_number);
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            println!("-------------------\nsubject serial number: {:?}",subject_cert.tbs_certificate.serial_number);
 
-            /* VERIFICATION PROCESS:
+            /* VERIFICATION PROCESS: (use proof composition)
                 - verify validity period
                 - verify message digest (not tampered msg)
-                - verify chain? (proof composition)
+                - verify chain? 
+                    - check CA in eIDAS Trusted List
              */
             
             // VALIDITY
             // extracting validity value and pass to guest to verify period
-            let validity = &subject_cert.tbs_certificate.validity;
+            /*let validity = &subject_cert.tbs_certificate.validity;
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
             let period_receipt = prove_validity_period(validity.not_before, validity.not_after, now);
             
             let seal = encode_seal(&period_receipt)?;
             let journal = period_receipt.journal.bytes.clone();
 
-            //println!("***PERIOD***\nseal: {:?}\njournal: {:?}\n",seal,journal);
+            println!("***PERIOD***\nseal: {:?}\njournal: {:?}\n",seal,journal);*/
 
+
+            
             // SIGNATURE
             //extracting value of: signature, algorithm used, public key and message to be signed
             let signer_info = &signer_infos[0];
             let signature = &signer_info.signature; 
             let digest_algorithm_oid = &signer_info.digest_algorithm.algorithm;
             let signature_algorithm_oid = &signer_info.signature_algorithm.algorithm;
-            println!("signature oid: {:?}\n",signature_algorithm_oid);
             let public_key = &subject_cert.tbs_certificate.subject_public_key_info.subject_public_key;
-            println!("\npublickey: {:?}",public_key);
             let msg = if signer_info.auth_attributes.is_some() { 
-                &signer_info.auth_bytes 
+                &signer_info.auth_bytes
+                //&subject_cert.tbs_certificate.tbs_bytes
             } else {
                 &pkcs7.content_bytes //this is the data of the signed document
             };
-            
-            println!("-------------------------------------------\n\n");
-            println!("msg {:?}\n",hex::encode(&msg));
 
             let signature_receipt = match &public_key {
                 PublicKey::Rsa { modulus, exponent } => {
                     prove_signature_verification(
+                        pkcs7.content.certs,
                         msg.as_ref(),
                         digest_algorithm_oid.as_ref(), 
                         signature.as_ref(), 
                         modulus.as_ref(), 
                         Some(exponent.as_ref()),
-                        &period_receipt,
+                        //&period_receipt,
                     )
                 }
                 PublicKey::Ecdsa { point } => {
                     prove_signature_verification(
+                        pkcs7.content.certs,
                         msg.as_ref(),
                         digest_algorithm_oid.as_ref(),
                         signature.as_ref(),
                         point.as_ref(),
                         None,
-                        &period_receipt,
+                        //&period_receipt,
                     )
                 }
             };
-            
-            /*let signature_receipt = prove_signature_verification(
-                msg.as_ref(),
-                digest_algorithm_oid.as_ref(), 
-                signature.as_ref(), 
-                public_key.modulus.as_ref(), 
-                public_key.exp.as_ref(),
-                &period_receipt,
-            );*/
+            // VERIFY CHAIN
+            let cert_chain = prove_chain(&pkcs7.content.certs, subject_cert).expect("failed to build certificate chain");
+
 
             //let seal_sig = encode_seal(&signature_receipt)?;
             //let journal_sig = signature_receipt.journal.bytes.clone();
@@ -319,13 +364,25 @@ fn main() -> Result<()> {
             /*let calldata = IRiscZeroElection::verifyAndCommitVoteCall {
                 seal: seal.into(),
                 journal: journal.into(),
-            };*/
+            };
 
-            //slet runtime = tokio::runtime::Runtime::new()?;
+            let contract = args.contract;
+            let tx = TransactionRequest::default()
+                .with_to(contract)
+                .with_call(&calldata);
+
+            let tx_hash = provider
+                .send_transaction(tx)
+                .await
+                .context("Failed to send transaction")?;
+
+            println!("Transaction sent with hash: {:?}", tx_hash);*/
+
+            //let runtime = tokio::runtime::Runtime::new()?;
 
             // Send transaction: Finally, the TxSender component sends the transaction to the Ethereum blockchain,
             // calling function verifyAndCommitVote of RiscZeroElection
-            //runtime.block_on(tx_sender.send(seal, journal))?;
+            //runtime.block_on(tx_sender.send(calldata))?;
 
             Ok(())
 
