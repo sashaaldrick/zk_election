@@ -38,7 +38,7 @@ fn main() {
     let mut input_bytes = Vec::<u8>::new();
     env::stdin().read_to_end(&mut input_bytes).unwrap();
     */
-
+    println!("\n[guest] period verifier");
     let mut is_period_valid = false;
 
     if nbefore < now && nafter > now {
