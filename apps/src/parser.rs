@@ -232,7 +232,6 @@ impl SignerInfo {
     pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
 
         cons.take_sequence(|cons| {
-           
             let version = cons.take_primitive_if(Tag::INTEGER, |content| content.to_u8())?;
             let signer_identifier = SignerIdentifier::take_from(cons)?;
             /*let issuer_and_serial_number = IssuerAndSerialNumber::take_from(cons)?;
@@ -248,8 +247,8 @@ impl SignerInfo {
             let mut auth_bytes = auth_captured.as_slice().to_vec();
             
             //remove IMPLICIT TAG (A0), insert SET OF TAG (0x31)
-            auth_bytes[0] = 0x31;
-
+            //auth_bytes[0] = 0x31;
+            auth_bytes.drain(0..1);
             let auth_source = auth_captured.into_source();
 
             let auth_attributes = Constructed::decode(auth_source, Mode::Ber, |cons|{
@@ -263,27 +262,27 @@ impl SignerInfo {
                 Ok(auth_attrs)
             }).expect("failed to parse auth attributes");
             
-            //println!("auth attr: {:?}",auth_attributes);
-
             let signature_algorithm = AlgorithmIdentifier::take_from(cons)?;
 
             let signature_captured = cons.capture_all()?;
-            //let b = signature_captured.as_slice().to_vec();
-            //println!("\nb {:?}\n sign algo: {:?}",b,signature_algorithm.algorithm.as_ref().bytes());
+            let sign_source = signature_captured.as_slice().into_source();   
+
             let signature = if signature_algorithm.algorithm.as_ref() == RSA_OID_BYTES{
-                let rsa_signature = cons.take_value(|_,content| {
-                    let sign = content.as_primitive().map_err(|e|{
-                        DecodeError::content(format!("Expected constructed content: {}", e), decode::Pos::default())
+                let rsa_signature = Constructed::decode(sign_source, Mode::Ber, |cons|{
+                    let sign = cons.take_value(|_,content|{
+                        let primitive_bytes = content.as_primitive()?;
+                        let bytes = primitive_bytes.slice_all()?.to_vec();
+                        _=primitive_bytes.skip_all();
+                        Ok(bytes)
                     })?;
-                    let sign_bytes = sign.slice_all()?.to_vec();
-                    _=sign.skip_all();
-                    Ok(sign_bytes)
-                })?;
-                _=cons.skip_all();
-                rsa_signature
+                    _=cons.skip_all();
+                    Ok(sign)
+                    }).expect("failed to parse rsa signature");
+
+                    _=cons.skip_all();
+                    rsa_signature
     
             } else if signature_algorithm.algorithm.as_ref() == ECDSA_SIGN_OID_BYTES {
-                let sign_source = signature_captured.as_slice().into_source();            
                 let signature = Constructed::decode(sign_source, Mode::Ber, |cons| {
                     cons.take_value(|_, content| {
                        
@@ -387,6 +386,7 @@ impl SignerIdentifier {
                 Ok(sn_hex)
             })?;
 
+            println!("\n\n SIGNED IDENTIFIER: {:?}",issuer);
             Ok(SignerIdentifier {
                 issuer,
                 serial_number,
