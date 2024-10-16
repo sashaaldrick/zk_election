@@ -15,7 +15,7 @@ use std::io::Read;
 use std::fmt;
 use hex;
 use chrono::{NaiveDateTime, TimeZone, Utc};
-
+use serde::{Serialize, Deserialize};
 //use chrono::{NaiveDateTime, TimeZone, Utc};
 //use ring::signature::{self, UnparsedPublicKey};
 const ECDSA_OID_BYTES: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
@@ -67,12 +67,13 @@ pub struct IssuerAndSerialNumber {
     pub serial_number: Vec<u8>,
 }*/
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Name {
     pub rdn_sequence: Vec<RelativeDistinguishedName>,
+    name_bytes: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct RelativeDistinguishedName {
     pub attribute: Attribute,
 }
@@ -82,7 +83,7 @@ pub struct AuthenticatedAttributes {
     //pub auth_attr_bytes: Vec<u8>, 
     pub attributes: Vec<Attribute>,
 }*/
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Attribute {
     pub oid: Oid,           
     pub value: Vec<u8>, 
@@ -95,8 +96,18 @@ pub struct Certificate {
     pub signature_algorithm: AlgorithmIdentifier,
     pub signature_value: Vec<u8>,
 }
-#[derive(Debug)]
 
+//optimized struct for guest verification
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CertificateData {
+    pub subject: Vec<u8>,
+    pub issuer: Vec<u8>,
+    pub issuer_pk: PublicKey, 
+    pub signature: Vec<u8>,
+    pub tbs_bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
 pub struct TbsCertificate {
     pub tbs_bytes: Vec<u8>,
     pub version: Option<u8>,
@@ -108,13 +119,11 @@ pub struct TbsCertificate {
     pub subject_public_key_info: SubjectPublicKeyInfo,
 }
 #[derive(Debug)]
-
 pub struct AlgorithmIdentifier {
     pub algorithm: Oid,
     pub parameters: Vec<u8>, // Optional parameters
 }
 #[derive(Debug)]
-
 pub struct Validity {
     pub not_before: u64,
     pub not_after: u64,
@@ -126,8 +135,8 @@ pub struct SubjectPublicKeyInfo {
     pub subject_public_key: PublicKey,
     //pub exp: Vec<u8>,
 }
-#[derive(Debug)]
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PublicKey {
     Rsa {
         modulus: Vec<u8>,
@@ -403,15 +412,23 @@ impl Name {
     
         //println!("name cons: {:?}\n",cons);
         let mut rdn_sequence = Vec::new();
+        let name_captured = cons.capture_one()?;
+        let name_bytes = name_captured.as_slice().to_vec();
+        let name_source = name_captured.into_source();
 
-        let name = cons.take_sequence(|cons|{
-            while let Ok(rdn) = RelativeDistinguishedName::take_from(cons) {
-                rdn_sequence.push(rdn);
-            }
-            
-            Ok( Name { rdn_sequence })
+        let name = Constructed::decode(name_source, Mode::Der, |cons|{
+            cons.take_sequence(|cons|{
+                while let Ok(rdn) = RelativeDistinguishedName::take_from(cons) {
+                    rdn_sequence.push(rdn);
+                }
+                Ok( Name { rdn_sequence, name_bytes })
+            })
         }).expect("failed to parse name");
         Ok(name)
+    }
+
+    pub fn to_der(&self) -> Vec<u8>{
+        self.name_bytes.clone()
     }
 }
 
@@ -479,129 +496,7 @@ impl PartialEq for RelativeDistinguishedName {
         (self.attribute.value == other.attribute.value)
     }
 }
-/*
-impl IssuerAndSerialNumber {
-    pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
-        println!("PARSING issuer serial");
 
-        cons.take_sequence(|cons| {
-            let issuer = Name::take_from(cons)?;
-            let serial_number = cons.take_primitive_if(Tag::INTEGER, |content| {
-                let bytes = content.slice_all()?.to_vec();
-                println!("issuer serial number: {:?}",bytes);
-                Ok(bytes)
-            })?;
-            
-            Ok(IssuerAndSerialNumber {
-                issuer,
-                serial_number,
-            })
-        })
-    }
-
-    pub fn to_string(&self) -> String {
-        format!(
-            "IssuerAndSerialNumber {{\n  issuer: {:?},\n  serial_number: {:?}\n}}",
-            self.issuer,
-            self.serial_number,
-        )
-    }
-}
-
-impl Name {
-    pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
-        println!("PARSING name");
-
-        /*cons.take_sequence(|cons| {
-            let mut rdn_sequence = Vec::new();
-            println!("[Name] Start parsing Name sequence...");
-
-            // Usa un approccio simile a quello usato per l'encrypted digest
-            while let Ok(rdn) = RelativeDistinguishedName::take_from(cons) {
-                println!("[Name] Parsed RelativeDistinguishedName: {:?}", rdn);
-                rdn_sequence.push(rdn);
-            }
-
-            // Saltare i dati rimanenti
-            let remaining = cons.capture_all()?;
-            println!("[Name] Remaining data skipped: {:?}", remaining);
-            Ok(Name { rdn_sequence })
-        })*/
-        /*cons.take_sequence(|cons| {
-            let mut rdn_set = Vec::new();
-            while let Ok(rdn) = RelativeDistinguishedName::take_from(cons) {
-                println!("[Name] parsed rdn {:?}",rdn);
-                rdn_set.push(rdn);
-            }
-            Ok( Name { rdn_sequence: rdn_set})
-        })*/
-        
-        let skipped = cons.capture_all()?;
-        //println!("skipped in Name: {:?}",skipped);
-        Ok( Name { rdn_sequence: Vec::new() } )
-    }
-}
-
-impl RelativeDistinguishedName {
-    pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
-
-        println!("PARSING rdn");
-
-        cons.take_set(|cons| {
-            let mut attributes = Vec::new();
-            println!("[RelativeDistinguishedName] Start parsing set...");
-
-            while let Ok(attr) = AttributeTypeAndValue::take_from(cons) {
-                println!("[RelativeDistinguishedName] Parsed AttributeTypeAndValue: {:?}", attr);
-                attributes.push(attr);
-            }
-
-            // Saltare i dati rimanenti
-            let remaining = cons.capture_all()?;
-            println!("[RelativeDistinguishedName] Remaining data skipped: {:?}", remaining);
-            Ok(RelativeDistinguishedName { attributes: attributes })
-        })
-    }
-}
-
-impl AttributeTypeAndValue {
-    pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
-        println!("PARSING attrTypeValue");
-
-        cons.take_sequence(|cons| {
-            let attribute_type = Oid::take_from(cons)?;
-            println!("[AttributeTypeAndValue] Parsed attribute type: {:?}", attribute_type);
-
-            /*let attribute_value = cons.take_value(|tag, content| {
-                match tag {
-                    Tag::PRINTABLE_STRING | Tag::UTF8_STRING => {
-                        let bytes = content.as_primitive()?.slice_all()?.to_vec();
-                        
-                        let value_bytes = bytes;
-                        println!("[AttributeTypeAndValue] Parsed attribute value (bytes): {:?}", value_bytes);
-
-                        Ok(String::from_utf8(value_bytes).expect("Valid UTF-8 string"))
-                    },
-                    _ => Err(DecodeError::content("Unsupported attribute value type", decode::Pos::default())),
-                }
-            })?;*/
-            let attribute_value = cons.take_value(|_,content| {
-                let bytes = content.as_primitive()?.slice_all()?.to_vec();
-                Ok(String::from_utf8(bytes).expect("Failed to parse attribute_value with type"))
-            })?;
-
-            // Saltare eventuali dati rimanenti
-            let remaining = cons.capture_all()?;
-            println!("[AttributeTypeAndValue] Remaining data skipped: {:?}", remaining);
-
-            Ok(AttributeTypeAndValue {
-                attribute_type,
-                attribute_value,
-            })
-        })
-    }
-}
-*/
 /* AUTH ATTR BONO
 impl AuthenticatedAttributes {
     pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
@@ -648,7 +543,6 @@ impl AuthenticatedAttributes {
     }
 }*/
 
-
 impl Attribute {
     pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
         //println!("cons: {:?}",cons.capture_all()?.as_slice());
@@ -690,7 +584,6 @@ impl AttributeValue {
           
     }
 }*/
-
 
 impl ContentInfo {
     pub fn take_from<S: decode::Source>(cons: &mut Constructed<S>) -> Result<Self, DecodeError<S::Error>> {
@@ -750,7 +643,16 @@ impl Certificate {
             
         })
     }
-    
+
+    pub fn extract_data(&self, issuer_cert: &Certificate) -> CertificateData {
+        CertificateData {
+            subject: self.tbs_certificate.subject.to_der(),
+            issuer: self.tbs_certificate.issuer.to_der(),
+            issuer_pk: issuer_cert.tbs_certificate.subject_public_key_info.subject_public_key.clone(),
+            signature: self.signature_value.clone(),
+            tbs_bytes: self.tbs_certificate.tbs_bytes.clone(),
+        }
+    }
 
     pub fn to_string(&self) -> String {
         format!(
