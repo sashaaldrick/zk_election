@@ -178,7 +178,7 @@ fn verify_rsa(
 
 }
 
-/*
+
 fn verify_ecdsa(
     key_bytes: &[u8],
     signature_bytes: &[u8],
@@ -196,10 +196,8 @@ fn verify_ecdsa(
 
     let res = verifying_key.verify(&msg, &signature).is_ok();
     println!("\nres: {:?}",res);
-
     res
-  
-}*/
+}
 
 
 
@@ -260,10 +258,10 @@ fn main() {
         &signature,
         &digest );*/
     
-        let mut hasher = ksha256::new();
-        hasher.update(&msg);
-        let digest = hasher.clone().finalize();
-        println!("\n\n-----------------------\nhashing msg: {:?}\nhasher: \ndigest: {:?}",hex::encode(msg.clone()),hex::encode(digest));
+    let mut hasher = ksha256::new();
+    hasher.update(&msg);
+    let digest = hasher.clone().finalize();
+    println!("\n\n-----------------------\nhashing msg: {:?}\nhasher: \ndigest: {:?}",hex::encode(msg.clone()),hex::encode(digest));
 
 
     // verify RSA or ECDSA
@@ -273,8 +271,8 @@ fn main() {
     }
     else {
         println!("[guest - main] Sending to verify_ecdsa:\npubkey: {:?}\n\nsignature: {:?}\n\nmsg: {:?}",hex::encode(&pubkey_mod),hex::encode(&signature),hex::encode(&digest));
-        //verify_ecdsa(&pubkey_mod, &signature, &msg);
-        true
+        verify_ecdsa(&pubkey_mod, &signature, &msg)
+        
     };
 
     // commit to journal

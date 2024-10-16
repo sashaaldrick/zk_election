@@ -1,3 +1,5 @@
+use pkcs7_core::{load_pkcs7, Certificate, PublicKey};
+
 use alloy::{
     network::{EthereumWallet, TransactionBuilder},
     primitives::{Address, Bytes},
@@ -7,7 +9,7 @@ use alloy::{
     sol,
 };
 use anyhow::{Context, Result};
-use apps::parser::Certificate;
+//use apps::parser::Certificate;
 use clap::Parser;
 use ethers::prelude::*;
 use methods::{PERIOD_VERIFIER_ELF, SIGNATURE_VERIFIER_ELF};
@@ -15,7 +17,7 @@ use risc0_ethereum_contracts::groth16;
 use risc0_ethereum_contracts::encode_seal;
 use risc0_zkvm::{default_prover, ExecutorEnv, ProverOpts, VerifierContext, Receipt};
 use std::time::{SystemTime, UNIX_EPOCH};
-use apps::parser::{load_pkcs7, PublicKey};
+//use apps::parser::{load_pkcs7, PublicKey};
 //use crate::IRiscZeroElection::verifyAndCommitVoteCall;
 use url::Url;
 use hex;
@@ -186,7 +188,7 @@ fn prove_signature_verification(
     signature: &[u8], 
     pub_key: &[u8], 
     pub_key_exp: Option<&[u8]>, // only for RSA
-    prec_receipt: &Receipt,
+    //prec_receipt: &Receipt,
 ) -> Receipt {
 
     // if RSA, send exp lenght, if ECDSA exp.len = 0
@@ -252,6 +254,54 @@ fn build_certificate_chain<'a>(
 
     Ok(chain)
 }
+
+
+
+fn prove_pkcs7_verification (
+    certs: &[Certificate],
+    subj_cert: &Certificate,
+    msg: &[u8],
+    algo_oid: &[u8], 
+    signature: &[u8], 
+    pub_key: &[u8], 
+    pub_key_exp: Option<&[u8]>,
+) -> Receipt {
+
+    let mut env_builder = ExecutorEnv::builder();
+
+    let certs_input = (certs, subj_cert);
+    env_builder.write(&certs_input).unwrap(); 
+
+    // if RSA, send exp lenght, if ECDSA exp.len = 0
+    let lengths = if let Some(exp) = pub_key_exp {
+        (msg.len(), algo_oid.len(), signature.len(), pub_key.len(), exp.len())
+    } else {
+        (msg.len(), algo_oid.len(), signature.len(), pub_key.len(), 0)
+    };
+
+
+    env_builder.write(&lengths).unwrap();
+    env_builder.write_slice(&msg);
+    env_builder.write_slice(&algo_oid);
+    env_builder.write_slice(&signature);
+    env_builder.write_slice(&pub_key);
+
+    if let Some(exp) = pub_key_exp {
+        env_builder.write_slice(&exp);
+    }
+
+    let env = env_builder.build().unwrap();
+
+    let prover = default_prover();
+    prover.prove_with_ctx(
+        env,
+        &VerifierContext::default(),
+        SIGNATURE_VERIFIER_ELF,
+        &ProverOpts::groth16(),
+    ).unwrap().receipt
+
+}
+
 
 
 
@@ -330,7 +380,8 @@ fn main() -> Result<()> {
             let signature_receipt = match &public_key {
                 PublicKey::Rsa { modulus, exponent } => {
                     prove_signature_verification(
-                        pkcs7.content.certs,
+                        //pkcs7.content.certs,
+                        subj_cert,
                         msg.as_ref(),
                         digest_algorithm_oid.as_ref(), 
                         signature.as_ref(), 
@@ -340,8 +391,9 @@ fn main() -> Result<()> {
                     )
                 }
                 PublicKey::Ecdsa { point } => {
-                    prove_signature_verification(
+                    prove_pkcs7_verification(
                         pkcs7.content.certs,
+                        subj_cert,
                         msg.as_ref(),
                         digest_algorithm_oid.as_ref(),
                         signature.as_ref(),
@@ -352,7 +404,7 @@ fn main() -> Result<()> {
                 }
             };
             // VERIFY CHAIN
-            let cert_chain = prove_chain(&pkcs7.content.certs, subject_cert).expect("failed to build certificate chain");
+            //let cert_chain = prove_chain(&pkcs7.content.certs, subject_cert).expect("failed to build certificate chain");
 
 
             //let seal_sig = encode_seal(&signature_receipt)?;

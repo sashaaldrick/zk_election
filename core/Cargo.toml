@@ -1,0 +1,11 @@
+[package]
+name = "pkcs7-core"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+bcder = "0.7.4"
+pem = "2"
+hex = "0.4.3"
+chrono = "0.4.38"

@@ -20,7 +20,7 @@ pragma solidity ^0.8.20;
 
 library ImageID {
     bytes32 public constant PERIOD_VERIFIER_ID =
-        bytes32(0x7ce1e8993383063dd68c7e201bfb0032fd5818e5b0df0f240d1bdecb8f9c47f4);
+        bytes32(0xa76c5439eafc81095da94cf5fbf2900e2a6885ab1b5936efb735967bb5060b93);
     bytes32 public constant SIGNATURE_VERIFIER_ID =
-        bytes32(0x82f0021b2f3027983a90b377bd6d8aedc0bfde0cd7ff5bbdd24e50febe4ba864);
+        bytes32(0x04cadee261895dcd63eeaa5e4509a7f035b5577ea2fab7c1f5172388c6ace801);
 }

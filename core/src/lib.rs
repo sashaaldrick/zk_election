@@ -990,32 +990,6 @@ impl SubjectPublicKeyInfo {
 }
 
 
-/* load single x509 file
-
-fn load_certificate(path: &str) -> Result<Certificate, Box<dyn std::error::Error>> {
-    let mut file = File::open(path)?;
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
-
-    let pem = pem::parse(buffer)?;
-    let bytes = pem.contents();
-
-    let cert = Constructed::decode(bytes, Mode::Der, |constructed| {
-        Certificate::take_from(constructed)
-    }).map_err(|err| {
-        eprintln!("Error decoding certificate: {:?}", err);
-        Box::new(err) as Box<dyn std::error::Error>
-    })?;
-    
-    Ok(cert)/* 
-    let mut file = File::open(path)?;
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
-
-    let cert = X509::from_der(&buffer)?;
-    Ok(cert)*/
-}
-*/
 
 pub fn load_pkcs7(path: &str) -> Result<Pkcs7, Box<dyn std::error::Error>> {
     let mut file = File::open(path)?;
@@ -1043,26 +1017,3 @@ pub fn load_pkcs7(path: &str) -> Result<Pkcs7, Box<dyn std::error::Error>> {
 
     Ok(pkcs7)
 }
-
-
-/*
-    problema
-
-
-fn main() {
-    match load_pkcs7("../sdoc.p7b") {
-        Ok(pkcs7) => {
-            println!("PKCS#7 file loaded successfully!");
-            println!("signed attributes: {:?}",pkcs7.content.signer_infos[0].auth_attributes);
-            //println!("tbs_bytes: {:?}",pkcs7.content.certs[0].tbs_certificate.tbs_bytes);
-            //println!("auth attr{:?}",pkcs7.content.signer_infos[0].authenticated_attributes);
-            //let a = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-            //println!("now {}", a)
-
-        },
-        Err(e) => println!("Failed to load PKCS#7 file: {}", e),
-    }
-}*/
-    
-
-
