@@ -1,4 +1,4 @@
-use pkcs7_core::{load_pkcs7, Certificate, PublicKey};
+use pkcs7_core::{load_pkcs7, Certificate, CertificateData, PublicKey};
 
 use alloy::{
     network::{EthereumWallet, TransactionBuilder},
@@ -12,15 +12,14 @@ use anyhow::{Context, Result};
 //use apps::parser::Certificate;
 use clap::Parser;
 use ethers::prelude::*;
-use methods::{PERIOD_VERIFIER_ELF, SIGNATURE_VERIFIER_ELF};
+use methods::{PERIOD_VERIFIER_ELF, PKCS7_VERIFY_ELF};
 use risc0_ethereum_contracts::groth16;
 use risc0_ethereum_contracts::encode_seal;
 use risc0_zkvm::{default_prover, ExecutorEnv, ProverOpts, VerifierContext, Receipt};
 use std::time::{SystemTime, UNIX_EPOCH};
-//use apps::parser::{load_pkcs7, PublicKey};
+use std::collections::HashMap;
 //use crate::IRiscZeroElection::verifyAndCommitVoteCall;
 use url::Url;
-use hex;
 
 // `IRiscZeroElection` interface automatically generated via the alloy `sol!` macro.
 sol! {
@@ -182,7 +181,8 @@ fn prove_rsa_verification(
 }*/
 
 
-fn prove_signature_verification(
+fn prove_pkcs7_verification(
+    chain_data: Vec<CertificateData>,
     msg: &[u8],
     algo_oid: &[u8], 
     signature: &[u8], 
@@ -200,6 +200,7 @@ fn prove_signature_verification(
 
     let mut env_builder = ExecutorEnv::builder();
 
+    env_builder.write(&chain_data);
     env_builder.write(&lengths).unwrap();
     env_builder.write_slice(&msg);
     env_builder.write_slice(&algo_oid);
@@ -216,94 +217,50 @@ fn prove_signature_verification(
     prover.prove_with_ctx(
         env,
         &VerifierContext::default(),
-        SIGNATURE_VERIFIER_ELF,
+        PKCS7_VERIFY_ELF,
         &ProverOpts::groth16(),
     ).unwrap().receipt
 
 }
 
 
-fn build_certificate_chain<'a>(
-    certs: &'a [Certificate],
-    leaf_cert: &'a Certificate,
-) -> Result<Vec<&'a Certificate>, String> {
+fn extract_certificate_data(
+    certs: &[Certificate],
+    subj_cert: &Certificate,
+) -> Vec<CertificateData> {
 
-    let mut chain = Vec::new();
-    let mut current_cert = leaf_cert;
+    println!("\n---extract_certificate_data---\ncerts len: {}\n",certs.len());
 
-    //println!("\nstarting build chain. leaf: {:?}",current_cert);
+    let mut certs_chain_data: Vec<CertificateData> = Vec::new();
+
+    // hashmap for easily map a subject to his cert
+    let cert_map: HashMap<Vec<u8>, &Certificate> = certs.iter()
+        .map(|cert| (cert.tbs_certificate.subject.to_der(), cert)).collect();
+
+    let mut current_cert = subj_cert;
+
+    // WARNING: POSSIBLE LOOP, must handle this 
     loop {
-        chain.push(current_cert);
-        println!("\npushed to chain (subject): {:?}\n",current_cert.tbs_certificate.subject.to_string());
-
-        if current_cert.tbs_certificate.issuer == current_cert.tbs_certificate.subject {
-            // Reached self-signed certificate (root CA)
-            //maybe check here if it's present in LOTL
+        // find the issuer's certificate in the map
+        let issuer_cert = cert_map
+            .get(&current_cert.tbs_certificate.issuer.to_der())
+            .ok_or_else(|| {format!("Issuer certificate not found for cert {:?}",current_cert.tbs_certificate.subject)}).expect("failed to get issuer_cert");
+        
+        //println!("\ncurrent cert: {:?} \nissuer cert: {:?}",current_cert.tbs_certificate.serial_number,issuer_cert.tbs_certificate.serial_number);
+       
+        let cert_data = current_cert.extract_data(issuer_cert);
+        certs_chain_data.push(cert_data);
+        
+        // if root CA, stop
+        if current_cert.tbs_certificate.subject == current_cert.tbs_certificate.issuer {
             break;
         }
-
-        let issuer_dn = &current_cert.tbs_certificate.issuer;
-        println!("issuer_dn: {:?}",issuer_dn.to_string());
-
-        let issuer_cert = certs.iter()
-            .find(|cert| &cert.tbs_certificate.subject == issuer_dn)
-            .ok_or("Issuer certificate not found")?;
 
         current_cert = issuer_cert;
     }
 
-    Ok(chain)
+    certs_chain_data
 }
-
-
-
-fn prove_pkcs7_verification (
-    certs: &[Certificate],
-    subj_cert: &Certificate,
-    msg: &[u8],
-    algo_oid: &[u8], 
-    signature: &[u8], 
-    pub_key: &[u8], 
-    pub_key_exp: Option<&[u8]>,
-) -> Receipt {
-
-    let mut env_builder = ExecutorEnv::builder();
-
-    let certs_input = (certs, subj_cert);
-    env_builder.write(&certs_input).unwrap(); 
-
-    // if RSA, send exp lenght, if ECDSA exp.len = 0
-    let lengths = if let Some(exp) = pub_key_exp {
-        (msg.len(), algo_oid.len(), signature.len(), pub_key.len(), exp.len())
-    } else {
-        (msg.len(), algo_oid.len(), signature.len(), pub_key.len(), 0)
-    };
-
-
-    env_builder.write(&lengths).unwrap();
-    env_builder.write_slice(&msg);
-    env_builder.write_slice(&algo_oid);
-    env_builder.write_slice(&signature);
-    env_builder.write_slice(&pub_key);
-
-    if let Some(exp) = pub_key_exp {
-        env_builder.write_slice(&exp);
-    }
-
-    let env = env_builder.build().unwrap();
-
-    let prover = default_prover();
-    prover.prove_with_ctx(
-        env,
-        &VerifierContext::default(),
-        SIGNATURE_VERIFIER_ELF,
-        &ProverOpts::groth16(),
-    ).unwrap().receipt
-
-}
-
-
-
 
 
 //#[tokio::main]
@@ -333,15 +290,12 @@ fn main() -> Result<()> {
             println!("PKCS7 file loaded successfully!");
 
             let signer_infos = &pkcs7.content.signer_infos;
-            
             let signer_serial_number = &pkcs7.content.signer_infos[0].signer_identifier.serial_number;
 
             // use serial number to find user certificate
             let subject_cert = pkcs7.content.certs.iter()
                 .find(|cert| &cert.tbs_certificate.serial_number == signer_serial_number)
                 .expect("Subject certificate not found in certificate list");
-
-            println!("-------------------\nsubject serial number: {:?}",subject_cert.tbs_certificate.serial_number);
 
             /* VERIFICATION PROCESS: (use proof composition)
                 - verify validity period
@@ -361,14 +315,12 @@ fn main() -> Result<()> {
 
             println!("***PERIOD***\nseal: {:?}\njournal: {:?}\n",seal,journal);*/
 
-
-            
             // SIGNATURE
             //extracting value of: signature, algorithm used, public key and message to be signed
             let signer_info = &signer_infos[0];
             let signature = &signer_info.signature; 
             let digest_algorithm_oid = &signer_info.digest_algorithm.algorithm;
-            let signature_algorithm_oid = &signer_info.signature_algorithm.algorithm;
+            let _signature_algorithm_oid = &signer_info.signature_algorithm.algorithm;
             let public_key = &subject_cert.tbs_certificate.subject_public_key_info.subject_public_key;
             let msg = if signer_info.auth_attributes.is_some() { 
                 &signer_info.auth_bytes
@@ -377,11 +329,11 @@ fn main() -> Result<()> {
                 &pkcs7.content_bytes //this is the data of the signed document
             };
 
-            let signature_receipt = match &public_key {
+            /*let signature_receipt = match &public_key {
                 PublicKey::Rsa { modulus, exponent } => {
                     prove_signature_verification(
                         //pkcs7.content.certs,
-                        subj_cert,
+                        //subj_cert,
                         msg.as_ref(),
                         digest_algorithm_oid.as_ref(), 
                         signature.as_ref(), 
@@ -392,8 +344,37 @@ fn main() -> Result<()> {
                 }
                 PublicKey::Ecdsa { point } => {
                     prove_pkcs7_verification(
-                        pkcs7.content.certs,
-                        subj_cert,
+                        &pkcs7.content.certs,
+                        subject_cert,
+                        msg.as_ref(),
+                        digest_algorithm_oid.as_ref(),
+                        signature.as_ref(),
+                        point.as_ref(),
+                        None,
+                        //&period_receipt,
+                    )
+                }
+            };*/
+
+            // VERIFY CHAIN
+
+            let chain_data = extract_certificate_data(&pkcs7.content.certs, &subject_cert);
+
+            let receipt = match &public_key {
+                PublicKey::Rsa { modulus, exponent } => {
+                    prove_pkcs7_verification(
+                        chain_data,
+                        msg.as_ref(),
+                        digest_algorithm_oid.as_ref(), 
+                        signature.as_ref(), 
+                        modulus.as_ref(), 
+                        Some(exponent.as_ref()),
+                        //&period_receipt,
+                    )
+                }
+                PublicKey::Ecdsa { point } => {
+                    prove_pkcs7_verification(
+                        chain_data,
                         msg.as_ref(),
                         digest_algorithm_oid.as_ref(),
                         signature.as_ref(),
@@ -403,9 +384,46 @@ fn main() -> Result<()> {
                     )
                 }
             };
-            // VERIFY CHAIN
-            //let cert_chain = prove_chain(&pkcs7.content.certs, subject_cert).expect("failed to build certificate chain");
 
+            println!("\nreceipt: {:?}",receipt);
+        
+            /*match extract_certificate_data(&pkcs7.content.certs, &subject_cert) {
+                Ok(chain_data) => {
+                    // Serializza i dati con bincode
+                    //let serialized = bincode::serialize(&chain_data).expect("Serializzazione fallita");
+                    println!("okkkk chain data. len: {}\n",chain_data.len());
+
+                    let receipt = match &public_key {
+                        PublicKey::Rsa { modulus, exponent } => {
+                            prove_pkcs7_verification(
+                                chain_data,
+                                msg.as_ref(),
+                                digest_algorithm_oid.as_ref(), 
+                                signature.as_ref(), 
+                                modulus.as_ref(), 
+                                Some(exponent.as_ref()),
+                                //&period_receipt,
+                            )
+                        }
+                        PublicKey::Ecdsa { point } => {
+                            prove_pkcs7_verification(
+                                chain_data,
+                                msg.as_ref(),
+                                digest_algorithm_oid.as_ref(),
+                                signature.as_ref(),
+                                point.as_ref(),
+                                None,
+                                //&period_receipt,
+                            )
+                        }
+                    };
+
+
+                },
+                Err(e) => {
+                    println!("Errore nella costruzione della catena di certificati: {}", e);
+                },
+            }*/
 
             //let seal_sig = encode_seal(&signature_receipt)?;
             //let journal_sig = signature_receipt.journal.bytes.clone();
