@@ -14,34 +14,13 @@ use rsa::signature::{Verifier as RsaVerifier, SignatureEncoding, DigestVerifier}
 
 use pkcs7_core::{CertificateData, PublicKey};
 
-/*
-fn verify_rsa(
-    modulus_bytes: &[u8],
-    exp_bytes: &[u8],
-    signature_bytes: &[u8],
-    msg: &[u8],
-) -> bool {
-    // Costruisci la chiave pubblica RSA
-    let modulus = rsa::BigUint::from_bytes_be(modulus_bytes);
-    let exponent = rsa::BigUint::from_bytes_be(exp_bytes);
 
-    // Crea la chiave pubblica
-    let pub_key = match RsaPublicKey::new(modulus, exponent) {
-        Ok(key) => key,
-        Err(_) => return false, // Gestisci parametri chiave non validi
-    };
-
-    // Decodifica la firma applicando la chiave pubblica
-    match pub_key.verify(
-        pkcs1v15::PaddingScheme::new_pkcs1v15_sign::<Sha256>(),
-        msg,
-        signature_bytes,
-    ) {
-        Ok(_) => true,
-        Err(_) => false,
-    }
-    
-}*/
+const ECONTENT_MAX_LEN: usize = 128;
+const MSG_MAX_LEN: usize = 256;
+const ALGO_OID_MAX_LEN: usize = 9;
+const SIGNATURE_MAX_LEN: usize = 256;
+const PUBKEY_MOD_MAX_LEN: usize = 256;
+const PUBKEY_EXP_MAX_LEN: usize = 4;
 
 fn verify_rsa(
     modulus_bytes: &[u8],
@@ -180,17 +159,27 @@ fn verify_ecdsa(
 }
 
 
-fn verify_chain(chain: &[CertificateData]) -> bool {
+fn verify_chain(chain: &[CertificateData]) -> &[u8] {
+
+    let mut root_pk: &[u8] = &[];
     chain.iter().all(|cert| match &cert.issuer_pk {
         PublicKey::Rsa { modulus, exponent } => {
-
+            
+            if cert.subject == cert.issuer {
+                root_pk = modulus.as_ref();
+            }
+            /*let mut mod_sign = cert.signature.to_vec();
+            if let Some(first_byte) = mod_sign.get_mut(0) {
+                *first_byte = first_byte.wrapping_add(1);
+            }*/
             verify_rsa(modulus, exponent, &cert.signature, &cert.tbs_bytes)
         }
         PublicKey::Ecdsa { point: _ } => {
             
-            true
+           true
         }
-    })
+    });
+    root_pk
 }
 
 
@@ -199,13 +188,45 @@ fn main() {
     let start = env::cycle_count();
 
     let cert_chain: Vec<CertificateData> = env::read();
-    let (msg_len, algoid_len, signature_len, pubkey_mod_len, pubkey_exp_len): (usize,usize,usize,usize,usize) = env::read();
+    let (econtent_len, msg_len, algoid_len, signature_len, pubkey_mod_len, pubkey_exp_len): (usize,usize,usize,usize,usize,usize) = env::read();
 
+    assert!(econtent_len <= ECONTENT_MAX_LEN);
+    assert!(msg_len <= MSG_MAX_LEN);
+    assert!(algoid_len <= ALGO_OID_MAX_LEN);
+    assert!(signature_len <= SIGNATURE_MAX_LEN);
+    assert!(pubkey_mod_len <= PUBKEY_MOD_MAX_LEN);
+    assert!(pubkey_exp_len <= PUBKEY_EXP_MAX_LEN);
+
+    // allocate fixed size array (stack)
+    let mut econtent   = [0u8; ECONTENT_MAX_LEN];
+    let mut msg        = [0u8; MSG_MAX_LEN];
+    let mut algo_oid   = [0u8; ALGO_OID_MAX_LEN];
+    let mut signature  = [0u8; SIGNATURE_MAX_LEN];
+    let mut pubkey_mod = [0u8; PUBKEY_MOD_MAX_LEN];
+    let mut pubkey_exp = [0u8; PUBKEY_EXP_MAX_LEN];
+
+    // read effective bytes of each array
+    env::read_slice(&mut econtent[..econtent_len]);
+    env::read_slice(&mut msg[..msg_len]);
+    env::read_slice(&mut algo_oid[..algoid_len]);
+    env::read_slice(&mut signature[..signature_len]);
+    env::read_slice(&mut pubkey_mod[..pubkey_mod_len]);
+    env::read_slice(&mut pubkey_exp[..pubkey_exp_len]);
+
+    // slice the array at the effective size
+    let econtent = &econtent[..econtent_len];
+    let msg = &msg[..msg_len];
+    let algo_oid = &algo_oid[..algoid_len];
+    let signature = &signature[..signature_len];
+    let pubkey_mod = &pubkey_mod[..pubkey_mod_len];
+    let pubkey_exp = &pubkey_exp[..pubkey_exp_len];
+    /*let mut econtent: Vec<u8> = vec![0; econtent_len];
     let mut msg: Vec<u8> = vec![0; msg_len];
     let mut algo_oid: Vec<u8> = vec![0; algoid_len];
     let mut signature: Vec<u8> = vec![0; signature_len];
     let mut pubkey_mod: Vec<u8> = vec![0; pubkey_mod_len];
 
+    //env::read_slice(&mut econtent);
     env::read_slice(&mut msg);
     env::read_slice(&mut algo_oid);
     env::read_slice(&mut signature);
@@ -217,7 +238,7 @@ fn main() {
         Some(pubkey_exp_vec)
     } else {
         None
-    };
+    };*/
 
     //let mut pubkey_exp: Vec<u8> = vec![0; pubkey_exp_len];
     //env::read_slice(&mut pubkey_exp);
@@ -253,7 +274,7 @@ fn main() {
 
     //let is_signature_valid = verify_rsa(&pubkey_mod, &pubkey_exp, &signature, &msg);
     // verify RSA or ECDSA
-    let is_signature_valid = if let Some(exp) = pubkey_exp {
+    /*let is_signature_valid = if let Some(exp) = pubkey_exp {
         //println!("[guest - main] Sending to verify_rsa:\npubkey_mod: {:?}\nsignature: {:?}\nmsg: {:?}",pubkey_mod,signature,hex::encode(&msg));
         verify_rsa(&pubkey_mod, &exp, &signature, &msg)
     }
@@ -261,11 +282,17 @@ fn main() {
         //println!("[guest - main] Sending to verify_ecdsa:\npubkey: {:?}\n\nsignature: {:?}\n\nmsg: {:?}",hex::encode(&pubkey_mod),hex::encode(&signature),hex::encode(&digest));
         verify_ecdsa(&pubkey_mod, &signature, &msg)
         
-    };
+    };*/
 
-    let is_chain_valid = verify_chain(&cert_chain);
+    let trusted_pk = verify_chain(&cert_chain);
+    let subject = &cert_chain[0].subject;
+
+    
+    env::commit_slice(&econtent);
+    env::commit_slice(subject);
+    env::commit_slice(trusted_pk);
 
     let end = env::cycle_count();
     println!("my_operation_to_measure: {}", end - start);
-    env::commit(&is_chain_valid);
+
 }

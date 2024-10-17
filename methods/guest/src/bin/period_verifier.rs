@@ -30,7 +30,6 @@ use risc0_zkvm::guest::env;
     env::commit_slice(number.abi_encode().as_slice());
 }*/
 fn main() {
-
     let (nbefore, nafter, now): (u64, u64, u64) = env::read();
     /*
     let mut input_bytes = Vec::<u8>::new();
@@ -41,7 +40,7 @@ fn main() {
 
     if nbefore < now && nafter > now {
         is_period_valid = true
-    } 
+    }
 
     env::commit(&is_period_valid);
 }
