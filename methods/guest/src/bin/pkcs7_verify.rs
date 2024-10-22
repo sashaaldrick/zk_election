@@ -11,16 +11,31 @@ use k256::{
 };
 use rsa::{RsaPublicKey, pkcs1v15::{VerifyingKey as RsaVerifyingKey, Signature as RsaSignature}, pkcs1v15};
 use rsa::signature::{Verifier as RsaVerifier, SignatureEncoding, DigestVerifier};
+use tiny_keccak::{Hasher, Keccak};
 
-use pkcs7_core::{CertificateData, PublicKey};
+use pkcs7_core::{CertificateData, PublicKey, Name};
 
 
 const ECONTENT_MAX_LEN: usize = 128;
+const SALT_MAX_LEN: usize = 16;
 const MSG_MAX_LEN: usize = 256;
 const ALGO_OID_MAX_LEN: usize = 9;
 const SIGNATURE_MAX_LEN: usize = 256;
 const PUBKEY_MOD_MAX_LEN: usize = 256;
 const PUBKEY_EXP_MAX_LEN: usize = 4;
+
+// 3 bytes oid + 0x0c + len (quando estraggo cf len=0x10)
+const CN_OID_BYTES: &[u8] = &[0x55,0x04,0x03,0x0c,0x10];
+
+
+fn keccak256(bytes: &[u8], salt: &[u8]) -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    let mut hasher = Keccak::v256();
+    hasher.update(bytes);
+    hasher.update(salt);
+    hasher.finalize(&mut digest);
+    digest
+}
 
 fn verify_rsa(
     modulus_bytes: &[u8],
@@ -182,15 +197,36 @@ fn verify_chain(chain: &[CertificateData]) -> &[u8] {
     root_pk
 }
 
+// brutal function to extract cf
+// TODO: verificare se è meglio cosi, o passare il cf al guest code
+fn extract_cf_field(subject: &[u8]) -> Result<&[u8], &'static str> {
+    // Find the position of the sequence in the subject
+    if let Some(pos) = subject.windows(CN_OID_BYTES.len()).position(|window| window == CN_OID_BYTES) {
+        // Calculate the start index of the field (after the OID sequence)
+        let start = pos + CN_OID_BYTES.len();
+        // Ensure there are enough bytes remaining
+        if subject.len() >= start + 5 {
+            // Extract the 16 bytes following the sequence
+            return Ok(&subject[start..start + 5]);
+        } else {
+            return Err("Not enough bytes after OID sequence");
+        }
+    }
+    Err("OID sequence not found in subject")
+}
+
+
+
 
 fn main() {
 
     let start = env::cycle_count();
 
     let cert_chain: Vec<CertificateData> = env::read();
-    let (econtent_len, msg_len, algoid_len, signature_len, pubkey_mod_len, pubkey_exp_len): (usize,usize,usize,usize,usize,usize) = env::read();
+    let (econtent_len, salt_len, msg_len, algoid_len, signature_len, pubkey_mod_len, pubkey_exp_len): (usize, usize,usize,usize,usize,usize,usize) = env::read();
 
     assert!(econtent_len <= ECONTENT_MAX_LEN);
+    assert!(salt_len <= SALT_MAX_LEN);
     assert!(msg_len <= MSG_MAX_LEN);
     assert!(algoid_len <= ALGO_OID_MAX_LEN);
     assert!(signature_len <= SIGNATURE_MAX_LEN);
@@ -199,6 +235,7 @@ fn main() {
 
     // allocate fixed size array (stack)
     let mut econtent   = [0u8; ECONTENT_MAX_LEN];
+    let mut salt = [0u8; SALT_MAX_LEN];
     let mut msg        = [0u8; MSG_MAX_LEN];
     let mut algo_oid   = [0u8; ALGO_OID_MAX_LEN];
     let mut signature  = [0u8; SIGNATURE_MAX_LEN];
@@ -207,6 +244,7 @@ fn main() {
 
     // read effective bytes of each array
     env::read_slice(&mut econtent[..econtent_len]);
+    env::read_slice(&mut salt[..salt_len]);
     env::read_slice(&mut msg[..msg_len]);
     env::read_slice(&mut algo_oid[..algoid_len]);
     env::read_slice(&mut signature[..signature_len]);
@@ -215,30 +253,13 @@ fn main() {
 
     // slice the array at the effective size
     let econtent = &econtent[..econtent_len];
+    let salt = &salt[..salt_len];
     let msg = &msg[..msg_len];
     let algo_oid = &algo_oid[..algoid_len];
     let signature = &signature[..signature_len];
     let pubkey_mod = &pubkey_mod[..pubkey_mod_len];
     let pubkey_exp = &pubkey_exp[..pubkey_exp_len];
-    /*let mut econtent: Vec<u8> = vec![0; econtent_len];
-    let mut msg: Vec<u8> = vec![0; msg_len];
-    let mut algo_oid: Vec<u8> = vec![0; algoid_len];
-    let mut signature: Vec<u8> = vec![0; signature_len];
-    let mut pubkey_mod: Vec<u8> = vec![0; pubkey_mod_len];
-
-    //env::read_slice(&mut econtent);
-    env::read_slice(&mut msg);
-    env::read_slice(&mut algo_oid);
-    env::read_slice(&mut signature);
-    env::read_slice(&mut pubkey_mod);
-
-    let pubkey_exp = if pubkey_exp_len > 0 {
-        let mut pubkey_exp_vec: Vec<u8> = vec![0; pubkey_exp_len];
-        env::read_slice(&mut pubkey_exp_vec);
-        Some(pubkey_exp_vec)
-    } else {
-        None
-    };*/
+    
 
     //let mut pubkey_exp: Vec<u8> = vec![0; pubkey_exp_len];
     //env::read_slice(&mut pubkey_exp);
@@ -272,7 +293,8 @@ fn main() {
     
 
 
-    //let is_signature_valid = verify_rsa(&pubkey_mod, &pubkey_exp, &signature, &msg);
+    assert!(verify_rsa(&pubkey_mod, &pubkey_exp, &signature, &msg),"Signature is not valid!");
+    
     // verify RSA or ECDSA
     /*let is_signature_valid = if let Some(exp) = pubkey_exp {
         //println!("[guest - main] Sending to verify_rsa:\npubkey_mod: {:?}\nsignature: {:?}\nmsg: {:?}",pubkey_mod,signature,hex::encode(&msg));
@@ -286,12 +308,22 @@ fn main() {
 
     let trusted_pk = verify_chain(&cert_chain);
     let subject = &cert_chain[0].subject;
+    let cn = extract_cf_field(subject).expect("failed to extract common_name field value");
 
-    
-    env::commit_slice(&econtent);
-    env::commit_slice(subject);
-    env::commit_slice(trusted_pk);
+    let salted_cf = keccak256(cn,salt);
 
+    /*
+        COMMIT: 
+            - address/msg (se commit solo address so che è lungo esattamente 42 caratteri)
+            - hash (cf+salt) = 32 byte
+            - root pk = tutto il resto (solitamente 256 byte)
+    */
+
+    assert!(!trusted_pk.is_empty(),"Certificate chain is not valid!");
+    println!("\nguest. committing data:\necontent (eth address): {:?}\nsalted cf: {:?}\ntrusted_pk: {:?}",hex::encode(&econtent),hex::encode(&salted_cf), hex::encode(&trusted_pk));
+    env::commit_slice(&econtent);  //20 byte eth address (_to)
+    env::commit_slice(&salted_cf); //32 byte
+    env::commit_slice(trusted_pk); 
     let end = env::cycle_count();
     println!("my_operation_to_measure: {}", end - start);
 
