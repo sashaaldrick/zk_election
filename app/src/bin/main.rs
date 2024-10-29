@@ -9,27 +9,35 @@ use alloy::{
     sol,
 };
 use anyhow::{Context, Result};
-//use apps::parser::Certificate;
 use clap::Parser;
 use ethers::prelude::*;
-use methods::{PERIOD_VERIFIER_ELF, PKCS7_VERIFY_ELF};
+use methods::PKCS7_VERIFY_ELF;
 use risc0_ethereum_contracts::encode_seal;
 use risc0_ethereum_contracts::groth16;
-use risc0_zkvm::{default_prover, ExecutorEnv, ProverOpts, Receipt, VerifierContext,compute_image_id};
+use risc0_zkvm::{
+    compute_image_id, default_prover, ExecutorEnv, ProverOpts, Receipt, VerifierContext,
+};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
-//use crate::IRiscZeroElection::verifyAndCommitVoteCall;
 use url::Url;
+use std::error::Error;
+use std::sync::Arc;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
+use tempfile::NamedTempFile;
+use tokio::task::spawn_blocking;
 
+// 3 bytes oid + 0x0c + len (quando estraggo cf len=0x10)
+const CN_OID_BYTES: &[u8] = &[0x55, 0x04, 0x03, 0x0c, 0x10];
 
-
-// `IRiscZeroElection` interface automatically generated via the alloy `sol!` macro.
+// `ICFWallet` interface automatically generated via the alloy `sol!` macro.
 sol! {
-    interface IRiscZeroElection {
-        function verifyAndCommitVote(bytes calldata seal, bytes calldata journal) public;
+    interface CfWallet {
+        function verifyAndTransfer(bytes calldata journal, bytes calldata seal) public;
     }
 }
-
 /// Arguments of the publisher CLI.
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -54,77 +62,31 @@ struct Args {
     #[clap(long)]
     p7_path: String,
 
+    //salt value, priveded as hex string
     #[clap(long)]
-    salt: u8,
+    salt: String,
 }
-
-fn prove_validity_period(not_before: u64, not_after: u64, now: u64) -> Receipt {
-    let validity = (not_before, not_after, now);
-
-    let env = ExecutorEnv::builder()
-        .write(&validity)
-        .unwrap()
-        .build()
-        .unwrap();
-    //, &ProverOpts::groth16(),
-
-    let prover = default_prover();
-    prover
-        .prove_with_ctx(
-            env,
-            &VerifierContext::default(),
-            PERIOD_VERIFIER_ELF,
-            &ProverOpts::groth16(),
-        )
-        .unwrap()
-        .receipt
-}
-
-/*use bcder::oid::Oid;
-
-const OID_SHA1: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05];
-const OID_SHA256: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01];
-
-fn select_digest_algorithm(algo_oid: &[u8]) -> &'static str {
-    match algo_oid {
-        OID_SHA1 => "SHA-1",
-        OID_SHA256 => "SHA-256",
-        _ => panic!("Unsupported digest algorithm OID"),
-    }
-}
-
-
-    // Implementazione per SHA-256
-    let digest = match algorithm {
-        "SHA-1" => {
-           println!("sha1");
-        }
-        "SHA-256" => {
-            println!("sha256");
-        }
-        _ => unreachable!(), // Questo non dovrebbe mai accadere
-    };*/
 
 
 
 fn prove_pkcs7_verification(
-    chain_data: Vec<CertificateData>,
-    econtent: &[u8],
-    salt: &[u8],
-    msg: &[u8],
-    algo_oid: &[u8],
-    signature: &[u8],
-    pub_key: &[u8],
-    pub_key_exp: Option<&[u8]>, // only for RSA
+    chain_data: &Vec<CertificateData>, //Vec<CertificateData>,
+    econtent: &Vec<u8>,
+    salt: &Vec<u8>,
+    msg: &Vec<u8>,
+    //algo_oid: &AlgorithmIdentifier, 
+    signature: &Vec<u8>,
+    pub_key: &Vec<u8>,
+    exponent: Option<&Vec<u8>>, // only for RSA
                                 //prec_receipt: &Receipt,
 ) -> Receipt {
     // if RSA, send exp lenght, if ECDSA exp.len = 0
-    let lengths = if let Some(exp) = pub_key_exp {
+    let lengths = if let Some(exp) = exponent {
         (
             econtent.len(),
             salt.len(),
             msg.len(),
-            algo_oid.len(),
+            //algo_oid.len(),
             signature.len(),
             pub_key.len(),
             exp.len(),
@@ -134,7 +96,7 @@ fn prove_pkcs7_verification(
             econtent.len(),
             salt.len(),
             msg.len(),
-            algo_oid.len(),
+            //algo_oid.len(),
             signature.len(),
             pub_key.len(),
             0,
@@ -149,11 +111,11 @@ fn prove_pkcs7_verification(
     env_builder.write_slice(&econtent);
     env_builder.write_slice(&salt);
     env_builder.write_slice(&msg);
-    env_builder.write_slice(&algo_oid);
+    //env_builder.write_slice(&algo_oid);
     env_builder.write_slice(&signature);
     env_builder.write_slice(&pub_key);
 
-    if let Some(exp) = pub_key_exp {
+    if let Some(exp) = exponent {
         env_builder.write_slice(&exp);
     }
 
@@ -165,7 +127,8 @@ fn prove_pkcs7_verification(
             &VerifierContext::default(),
             PKCS7_VERIFY_ELF,
             &ProverOpts::groth16(),
-        ).unwrap()
+        )
+        .unwrap()
         .receipt;
 
     receipt
@@ -175,11 +138,6 @@ fn extract_certificate_data(
     certs: &[Certificate],
     subj_cert: &Certificate,
 ) -> Vec<CertificateData> {
-    println!(
-        "\n---extract_certificate_data---\ncerts len: {}\n",
-        certs.len()
-    );
-
     let mut certs_chain_data: Vec<CertificateData> = Vec::new();
 
     // hashmap for easily map a subject to his cert
@@ -215,13 +173,12 @@ fn extract_certificate_data(
 
         current_cert = issuer_cert;
     }
-    println!("\n\ncert cahin data: {:?}",certs_chain_data);
     certs_chain_data
 }
 
 fn convert_to_bytes(str_bytes: Vec<u8>) -> Vec<u8> {
-
-    let mut econtent_str = String::from_utf8(str_bytes).expect("Failed to convert from bytes to string");
+    let mut econtent_str =
+        String::from_utf8(str_bytes).expect("Failed to convert from bytes to string");
     econtent_str = econtent_str.trim().to_string();
     let econtent_hex = econtent_str.trim_start_matches("0x");
     let address_bytes = hex::decode(econtent_hex).expect("Failed to decode hex");
@@ -229,158 +186,208 @@ fn convert_to_bytes(str_bytes: Vec<u8>) -> Vec<u8> {
     address_bytes
 }
 
-//#[tokio::main]
-fn main() -> Result<()> {
+// brutal function to extract cf
+// TODO: verificare se è meglio cosi, o passare il cf al guest code
+fn extract_cf_field(subject: &[u8]) -> Result<&[u8], &'static str> {
+    // Find the position of the sequence in the subject
+    if let Some(pos) = subject
+        .windows(CN_OID_BYTES.len())
+        .position(|window| window == CN_OID_BYTES)
+    {
+        // Calculate the start index of the field (after the OID sequence)
+        let start = pos + CN_OID_BYTES.len();
+        // Ensure there are enough bytes remaining
+        if subject.len() >= start + 16 {
+            // Extract the 16 bytes following the sequence
+            return Ok(&subject[start..start + 16]);
+        } else {
+            return Err("Not enough bytes after OID sequence");
+        }
+    }
+    Err("OID sequence not found in subject")
+}
 
+/*
+fn deploy_contract(
+    rpc_url: &str,
+    cf: &[u8],
+    salt: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    let project_dir = env::current_dir()?;
+    // create temp file to pass value for constructor to contract deploy script
+    let mut cf_temp_file = NamedTempFile::new_in(&project_dir)?;
+    cf_temp_file.as_file_mut().write_all(&cf)?;
+    let cf_temp_path = cf_temp_file.path().to_str().unwrap().to_string();
+
+    let mut salt_temp_file = NamedTempFile::new_in(&project_dir)?;
+    salt_temp_file.as_file_mut().write_all(&salt)?;
+    let salt_temp_path = salt_temp_file.path().to_str().unwrap().to_string();
+
+    std::fs::set_permissions(&salt_temp_path, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::set_permissions(&salt_temp_path, std::fs::Permissions::from_mode(0o600))?;
+
+    // Pass the file paths to the deploy script via environment variables
+    let mut cmd = Command::new("forge");
+    cmd.arg("script")
+        .arg("--rpc-url")
+        .arg(rpc_url)
+        .arg("--broadcast")
+        .arg("script/Deploy.s.sol")
+        //.arg("RiscZeroCFWalletDeploy")
+        .env("CF_FILE_PATH", &cf_temp_path)
+        .env("SALT_FILE_PATH", &salt_temp_path);
+
+    let status = cmd.status().expect("Failed to start deploy process");
+    if !status.success() {
+        return Err(format!("Deploy script exited with status: {}",status).into());
+    }
+    Ok(())
+}*/
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CLI Arguments: The application starts by parsing command-line arguments provided by the user.
-    //let args = Args::parse();
+    let args = Args::parse();
 
-    // Create a new transaction sender using the parsed arguments.
-    /*let tx_sender = TxSender::new(
-        args.chain_id,
-        &args.rpc_url,
-        &args.eth_wallet_private_key,
-        &args.contract,
-    )?;*/
 
     // Create an alloy provider for that private key and URL.
-    /*let wallet = EthereumWallet::from(args.eth_wallet_private_key);
+    let wallet = EthereumWallet::from(args.eth_wallet_private_key);
     let provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(wallet)
-        .on_http(args.rpc_url);*/
-
-
-    let salt: &[u8] = &[0x01,0x02,0x03];
+        .on_http(args.rpc_url);
 
 
 
+        
+    //let salt: &[u8] = &[0x01,0x02,0x03,0x04];
 
+    let pkcs7 = load_pkcs7(&args.p7_path)?;
 
-    match load_pkcs7("/home/moz/tesi/cert/rsa/cf_signed.p7m") {
-        //match load_pkcs7("/home/moz/tesi/cert/ecdsa/buono/signed_doc.p7m") {
-        Ok(pkcs7) => {
-            println!("PKCS7 file loaded successfully!");
+    // Wrap the entire pkcs7 struct in Arc if multiple parts are needed
+    let pkcs7 = Arc::new(pkcs7);
+    //let signer_info = &pkcs7.content.signer_infos[0];
+    let signer_info = Arc::new(pkcs7.content.signer_infos[0].clone());
+    //let signer_serial_number = signer_info.signer_identifier.serial_number;
 
-            let signer_infos = &pkcs7.content.signer_infos;
-            let signer_serial_number = &pkcs7.content.signer_infos[0]
-                .signer_identifier
-                .serial_number;
+    // use serial number to find user certificate
+    let subject_cert = pkcs7
+        .content
+        .certs
+        .iter()
+        .find(|cert| &cert.tbs_certificate.serial_number == &signer_info.signer_identifier.serial_number)
+        .expect("Subject certificate not found in certificate list");
+        //.clone();
 
-            // use serial number to find user certificate
-            let subject_cert = pkcs7
-                .content
-                .certs
-                .iter()
-                .find(|cert| &cert.tbs_certificate.serial_number == signer_serial_number)
-                .expect("Subject certificate not found in certificate list");
+    let subject_cert = Arc::new(subject_cert);
 
-            
-                /* VERIFICATION PROCESS: (use proof composition)
-               - verify validity period
-               - verify message digest (not tampered msg)
-               - verify chain?
-                   - check CA in eIDAS Trusted List
-            */
+    // is ok to extract here CF ???
+    let subj = subject_cert.tbs_certificate.subject.to_der();
+    let cf = extract_cf_field(&subj).expect("failed to extract common_name field value");
 
-            // VALIDITY
-            // extracting validity value and pass to guest to verify period
-            /*let validity = &subject_cert.tbs_certificate.validity;
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-            let period_receipt = prove_validity_period(validity.not_before, validity.not_after, now);
-
-            let seal = encode_seal(&period_receipt)?;
-            let journal = period_receipt.journal.bytes.clone();
-
-            println!("***PERIOD***\nseal: {:?}\njournal: {:?}\n",seal,journal);*/
-
-            // SIGNATURE
-            //extracting value of: signature, algorithm used, public key and message to be signed
-            let signer_info = &signer_infos[0];
-            let signature = &signer_info.signature;
-            let digest_algorithm_oid = &signer_info.digest_algorithm.algorithm;
-            let _signature_algorithm_oid = &signer_info.signature_algorithm.algorithm;
-            let public_key = &subject_cert.tbs_certificate.subject_public_key_info.subject_public_key;
-            let msg = if signer_info.auth_attributes.is_some() {
-                &signer_info.auth_bytes
-            } else {
-                &pkcs7.content_bytes //this is the data of the signed document
-            };
-
-            // VERIFY CHAIN
-            let chain_data = extract_certificate_data(&pkcs7.content.certs, &subject_cert);
-
-            let econtent_addr_bytes = convert_to_bytes(pkcs7.content.content_info.e_content);
-            println!("\n--main--\nsending econtent: {:?}\nsubject: {:?}\nsalt:len {:?}",hex::encode(&econtent_addr_bytes),hex::encode(&subject_cert.tbs_certificate.subject.to_der()),salt.len());
-            
-            let receipt = match &public_key {
-                PublicKey::Rsa { modulus, exponent } => {
-                    prove_pkcs7_verification(
-                        chain_data,
-                        //pkcs7.content.content_info.e_content.as_ref(),
-                        econtent_addr_bytes.as_ref(),
-                        salt,
-                        msg.as_ref(),
-                        digest_algorithm_oid.as_ref(),
-                        signature.as_ref(),
-                        modulus.as_ref(),
-                        Some(exponent.as_ref()),
-                        //&period_receipt,
-                    )
-                }
-                PublicKey::Ecdsa { point } => {
-                    prove_pkcs7_verification(
-                        chain_data,
-                        //pkcs7.content.content_info.e_content.as_ref(),
-                        econtent_addr_bytes.as_ref(),
-                        salt,
-                        msg.as_ref(),
-                        digest_algorithm_oid.as_ref(),
-                        signature.as_ref(),
-                        point.as_ref(),
-                        None,
-                        //&period_receipt,
-                    )
-                }
-            };
-
-            let seal = encode_seal(&receipt)?;
-            //let journal = receipt.journal.bytes.clone();
-            let journal = receipt.journal.bytes.clone();
-            println!("\njournal: {:?}\nseal: {:?}", journal,seal);
-
-            // TODO
-            // write a decode function for journal, extract (econtent, subject, root_pk)
-
-
-            /*let calldata = IRiscZeroElection::verifyAndCommitVoteCall {
-                seal: seal.into(),
-                journal: journal.into(),
-            };
-
-            let contract = args.contract;
-            let tx = TransactionRequest::default()
-                .with_to(contract)
-                .with_call(&calldata);
-
-            let tx_hash = provider
-                .send_transaction(tx)
-                .await
-                .context("Failed to send transaction")?;
-
-            println!("Transaction sent with hash: {:?}", tx_hash);*/
-
-            //let runtime = tokio::runtime::Runtime::new()?;
-
-            // Send transaction: Finally, the TxSender component sends the transaction to the Ethereum blockchain,
-            // calling function verifyAndCommitVote of RiscZeroElection
-            //runtime.block_on(tx_sender.send(calldata))?;
-
-            Ok(())
-        }
-        Err(e) => {
-            println!("Failed to load PKCS7 file: {}", e);
-            Err(anyhow::Error::msg(format!("{}", e)))
-        }
+    let salt = hex::decode(&args.salt)?;
+    println!("\nsalt: {:?}",salt);
+    if salt.len() > 32 {
+        eprintln!("Salt must be max 16 bytes (32 hex characters)");
+        std::process::exit(1);
     }
+    let salt = Arc::new(salt);
+    //deploy_contract(&rpc_url_str, &cf, &salt)?;
+
+    // SIGNATURE
+    //extracting value of: signature, algorithm used, public key and message to be signed
+    let signature = Arc::new(signer_info.signature.clone());
+    let digest_algorithm_oid = Arc::new(signer_info.digest_algorithm.algorithm.clone());
+    let _signature_algorithm_oid = &signer_info.signature_algorithm.algorithm;
+    let public_key = Arc::new(subject_cert
+        .tbs_certificate
+        .subject_public_key_info
+        .subject_public_key
+        .clone());
+
+    let msg_data = if signer_info.auth_attributes.is_some() {
+        signer_info.auth_bytes.clone()
+    } else {
+        pkcs7.content_bytes.clone() //this is the data of the signed document
+    };
+    let msg = Arc::new(msg_data);
+    // VERIFY CHAIN
+    let chain_data = extract_certificate_data(&pkcs7.content.certs, &subject_cert);
+    let chain_data = Arc::new(chain_data);
+
+    let econtent_addr_bytes = convert_to_bytes(pkcs7.content.content_info.e_content.clone());
+    let econtent_addr_bytes = Arc::new(econtent_addr_bytes);
+    //println!("\n--main--\nsending to guest...\n econtent: {:?}\nsubject: {:?}\nsalt:len {:?}",hex::encode(&econtent_addr_bytes),hex::encode(&subject_cert.tbs_certificate.subject.to_der()),salt.len() );
+
+    // Clone `Arc` pointers for use in the closure
+    let chain_data_cloned = Arc::clone(&chain_data);
+    let econtent_addr_bytes_cloned = Arc::clone(&econtent_addr_bytes);
+    let salt_cloned = Arc::clone(&salt);
+    let msg_cloned = Arc::clone(&msg);
+    let digest_algorithm_oid_cloned = Arc::clone(&digest_algorithm_oid);
+    let signature_cloned = Arc::clone(&signature);
+    let public_key_cloned = Arc::clone(&public_key);
+
+    // tokio::task::spawn_blocking
+    let receipt = spawn_blocking(move || {
+        match &*public_key_cloned {
+            PublicKey::Rsa { modulus, exponent } => {
+                prove_pkcs7_verification(
+                    &*chain_data_cloned,              
+                    &*econtent_addr_bytes_cloned,    
+                    &*salt_cloned,                    
+                    &*msg_cloned,                     
+                    //&*digest_algorithm_oid_cloned,    
+                    &*signature_cloned,               
+                    modulus,  
+                    Some(exponent),
+                )
+            }
+            PublicKey::Ecdsa { point } => {
+                prove_pkcs7_verification(
+                    &*chain_data_cloned,              // &CertificateData
+                    &*econtent_addr_bytes_cloned,    // &Vec<u8>
+                    &*salt_cloned,                    // &Vec<u8>
+                    &*msg_cloned,                     // &Vec<u8>
+                    //&*digest_algorithm_oid_cloned,    // &AlgorithmIdentifier
+                    &*signature_cloned,               // &Vec<u8>
+                    point,                             // &Vec<u8>
+                    None, 
+                )
+            }
+        }
+    })
+    .await
+    .context("Blocking task panicked (receipt)")?;
+
+    /*let imgid = compute_image_id(PKCS7_VERIFY_ELF);
+    println!("imagID {:?}\n",imgid);*/
+
+    let seal = encode_seal(&receipt)?;
+    let journal = receipt.journal.bytes.clone();
+
+    // build calldata to send to smart contract
+    let calldata = CfWallet::verifyAndTransferCall {
+        journal: journal.into(),
+        seal: seal.into(), 
+    };
+
+    println!("\ncalldata[ \njournal: {:?}\nseal: {:?}\n]\n",calldata.journal,calldata.seal);
+
+    //send transaction
+    let contract = args.contract;
+    let tx = TransactionRequest::default()
+        .with_to(contract)
+        .with_call(&calldata);
+    
+    println!("sending transaction {:?}\n",tx);
+    let tx_hash = provider
+        .send_transaction(tx)
+        .await
+        .context("Failed to send transaction")?;
+
+    println!("Transaction sent with hash: {:?}", tx_hash);
+
+
+    Ok(())
 }

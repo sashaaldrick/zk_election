@@ -22,7 +22,7 @@ import {IRiscZeroVerifier} from "risc0/IRiscZeroVerifier.sol";
 import {RiscZeroGroth16Verifier} from "risc0/groth16/RiscZeroGroth16Verifier.sol";
 import {ControlID} from "risc0/groth16/ControlID.sol";
 
-import {RiscZeroElection} from "../contracts/RiscZeroElection.sol";
+import {CfWallet} from "../contracts/CfWallet.sol";
 
 /// @notice Deployment script for the RISC Zero starter project.
 /// @dev Use the following environment variable to control the deployment:
@@ -35,12 +35,15 @@ import {RiscZeroElection} from "../contracts/RiscZeroElection.sol";
 ///
 /// https://book.getfoundry.sh/tutorials/solidity-scripting
 /// https://book.getfoundry.sh/reference/forge/forge-script
-contract RiscZeroElectionDeploy is Script {
+contract RiscZeroCFWalletDeploy is Script {
     // Path to deployment config file, relative to the project root.
     string constant CONFIG_FILE = "script/config.toml";
 
     IRiscZeroVerifier verifier;
+    bytes cf = hex"41424344454639395032414830303041"; //ABCDEF99P21H000A
+    bytes4 salt = 0x01020304;
 
+ 
     function run() external {
         // Read and log the chainID
         uint256 chainId = block.chainid;
@@ -94,9 +97,25 @@ contract RiscZeroElectionDeploy is Script {
             console2.log("Using IRiscZeroVerifier contract deployed at", address(verifier));
         }
 
+
+        /*string memory cfPath = vm.envString("CF_FILE_PATH");
+        string memory saltPath = vm.envString("SALT_FILE_PATH");
+        bytes memory cfBytes = vm.readFileBinary(cfPath);
+        bytes memory saltBytes = vm.readFileBinary(saltPath);
+        require(saltBytes.length <= 16, "Salt must be less than 17 bytes");
+        bytes16 salt = bytes16(saltBytes);
+        console2.log("cfbytes ");
+        console2.logBytes(cfBytes);
+        console2.log("saltBytes ");
+        console2.logBytes(saltBytes);*/
         // Deploy the application contract.
-        RiscZeroElection riscZeroElection = new RiscZeroElection(verifier);
-        console2.log("Deployed RiscZeroElection to", address(riscZeroElection));
+        //bytes32 saltedCf = keccak256(abi.encodePacked(cf, salt)); //not working, or i missing something
+        bytes32 saltedCf = hex"f5b5525190513583b016d16a12c459b6efc94602cdf39c5b190f0368b7266e66";
+
+        CfWallet cfwallet = new CfWallet(verifier, saltedCf);
+        console2.log("Deployed CfWallet to", address(cfwallet));
+        console2.log("with saltedCf = ");
+        console2.logBytes32(saltedCf);
 
         vm.stopBroadcast();
     }

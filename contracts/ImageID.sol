@@ -22,5 +22,5 @@ library ImageID {
     bytes32 public constant PERIOD_VERIFIER_ID =
         bytes32(0xadfc39ccb8055a51e09256e13fe74c98b3c018a18dfdb1e3eebcbed8eb51a494);
     bytes32 public constant PKCS7_VERIFY_ID =
-        bytes32(0x7a53991eece1f3907eb1b824954408e9818653eaaff4730827768fdbfd5a2bf0);
+        bytes32(0x1fdd66c125dc3a6467fa277002405704e62a74d4e47ffef7073e1e1b75d99435);
 }

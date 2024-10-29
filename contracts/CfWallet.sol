@@ -5,7 +5,7 @@ import {IRiscZeroVerifier} from "risc0/IRiscZeroVerifier.sol";
 import {ImageID} from "./ImageID.sol"; // auto-generated contract after running `cargo build`.
 
 
-contract CFWallet {
+contract CfWallet {
     
     bytes32 public constant imageId = ImageID.PKCS7_VERIFY_ID;
     IRiscZeroVerifier public immutable verifier;
@@ -16,8 +16,7 @@ contract CFWallet {
     bytes public lastSeal;
     bytes public lastJournal;
 
-  
-    event VerificationAttempted(address sender, bytes32 imageId, bytes journal);
+    //event LogAddress(address extracted);
 
     constructor(IRiscZeroVerifier _verifier, bytes32 _cf) {
         verifier = _verifier;
@@ -26,8 +25,11 @@ contract CFWallet {
 
     receive() external payable {}
 
+    //transfer the found to the address contained in the signed document
     function transfer(address payable _to) public {
         //require(verify_proof(proof, saltedCf, _to));
+        emit Log("transfer");
+
         payable(_to).transfer(address(this).balance);
     }
 
@@ -36,52 +38,59 @@ contract CFWallet {
     // verify the salted_CF
     // verify if the root_public_key is valid
     function verifyAndTransfer(bytes calldata journal, bytes calldata seal) public {
-        
-        verifier.verify(seal, imageId, sha256(journal));
-        to = bytesToAddress(journal[0:20]);
-        require(verifyJournalData(bytes32(journal[20:52]),journal[52:]), "Data verification failed");
-        //bytes32 extractedCf = bytes32(journal[20:52]);
-        //bytes rootPubKey = journal[52:];
-        //require(verifyJournalData(extractedCf, rootPubKey));
+        //require(journal.length == 308, "Invalid journal length");
 
+        verifier.verify(seal, imageId, sha256(journal));
+        //emit Log("Verifier verification passed");
+        
+        to = bytesToAddress(journal[0:20]);
+
+        bytes32 extractedCf = bytes32(journal[20:52]);
+        bytes calldata rootPubKey = journal[52:];
+
+        bool is_journal_valid = verifyJournalData(extractedCf, rootPubKey);
+        require(is_journal_valid, "Incorrect journal data");
+        emit Log("Journal data verified");
 
         transfer(to);
     }
 
+    event Log(string message);
 
-    function verifyJournalData(bytes32 extractedCf, bytes calldata rootPubKey) private view returns (bool is_verified) {
-
-        if (extractedCf != saltedCf){
-            return false;
-        }  
+    function verifyJournalData(bytes32 extractedCf, bytes calldata rootPubKey) private view returns (bool res){
+        
+        require(extractedCf == saltedCf, "different cf");
+        
         //check the root key here
 
         return true;
     }
 
 
-    function bytesToAddress(bytes memory bys) private pure returns (address payable addr) {
-        require(bys.length == 20, "Invalid length");
-        assembly {
-            // Carica i 32 byte dei dati effettivi
-            let data := mload(add(bys, 32))
-            // Sposta a destra di 96 bit (12 byte) per ottenere i primi 20 byte
-            addr := div(data, 0x1000000000000000000000000)
-        }
-        //oppure
-        //addr = payable(abi.decode(bys, (address)));
-
+    function bytesToAddress(bytes calldata b) internal pure returns (address payable addr) {
+        require(b.length == 20, "Invalid address length");
+        addr = payable(address(uint160(bytes20(b))));
     }
+
 
     //  TEST
 
-    function get_owner() public view returns (bytes32){
+    function get_owner() public view returns (bytes32) {
         return saltedCf;
     }
 
-    function get_extracted_address() public view returns (address){
+    function get_extracted_address() public view returns (address payable){
         return to;
     }
+
+    /*function get_extracted_cf() public view returns (bytes32){
+        return extractedCf;
+    }*/
+
+    function get_balance() public view returns (uint256){
+        return address(this).balance;
+    }
+
 
     /*function get_extracted_pubkey() public view returns (bytes){
         return journal[52:];
